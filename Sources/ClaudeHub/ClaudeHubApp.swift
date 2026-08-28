@@ -31,6 +31,9 @@ struct ClaudeHubApp: App {
         }
         .defaultSize(width: 1200, height: 760)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { UpdateChecker.shared.check() }
+            }
             CommandGroup(after: .newItem) {
                 Button("New Tab") { tabs.openNewTab() }
                     .keyboardShortcut("t", modifiers: .command)

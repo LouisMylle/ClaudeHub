@@ -42,6 +42,8 @@ off.
   hidden sessions stay resumable and can be unhidden anytime
 - 🌓 **Light & dark** — terminal theme follows the system appearance, live
 - 🛟 **Quit protection** — warns you before ⌘Q kills running sessions
+- 🔄 **Auto-update** — checks GitHub releases; one click downloads, installs,
+  and relaunches
 - 🔍 Search across projects and session titles, hand-off to Terminal.app,
   reveal in Finder, copy resume command
 
@@ -77,6 +79,7 @@ package.
 
 | Keys | Action |
 | --- | --- |
+| `⇧↩` | Newline in the Claude Code prompt (instead of submitting) |
 | `⌘T` | New shell tab in the current folder |
 | `⌘W` | Close tab |
 | `⇧⌘W` | Close window |

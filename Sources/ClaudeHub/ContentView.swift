@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var store: SessionStore
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
+    @ObservedObject var updates = UpdateChecker.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedSessionID: String?
     @State private var searchText = ""
@@ -50,7 +51,10 @@ struct ContentView: View {
         } detail: {
             detail
         }
-        .onAppear { store.refresh() }
+        .onAppear {
+            store.refresh()
+            updates.check()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
         }
@@ -90,6 +94,22 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 if store.isLoading { ProgressView().controlSize(.small) }
+                if updates.updateAvailable, let version = updates.latestVersion {
+                    Button {
+                        updates.downloadAndInstall()
+                    } label: {
+                        if updates.isInstalling {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Label("v\(version)", systemImage: "arrow.down.circle.fill")
+                                .font(.caption)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.accentColor)
+                    .help(updates.errorMessage
+                          ?? "Update to ClaudeHub \(version) — downloads, installs, and relaunches")
+                }
                 if !store.hiddenSessionIDs.isEmpty {
                     Button {
                         showHiddenSessions.toggle()

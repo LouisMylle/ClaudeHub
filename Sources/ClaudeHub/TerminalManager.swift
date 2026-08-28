@@ -16,11 +16,26 @@ final class TerminalManager: NSObject, ObservableObject {
     private(set) var claudePath: String = "claude"
     private var appearanceObservation: NSKeyValueObservation?
 
+    private var keyMonitor: Any?
+
     override private init() {
         super.init()
         resolveClaudePath()
         appearanceObservation = NSApplication.shared.observe(\.effectiveAppearance) { [weak self] _, _ in
             DispatchQueue.main.async { self?.refreshThemes() }
+        }
+        // Shift+Enter → ESC+CR (the Meta+Enter sequence), which Claude Code
+        // treats as "insert newline" instead of "submit" — matching VS Code's
+        // integrated-terminal behavior. Plain terminals can't distinguish
+        // Shift+Enter from Enter, so this is intercepted at the event level.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 36,  // Return
+               event.modifierFlags.contains(.shift),
+               let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
+                terminal.send(txt: "\u{1b}\r")
+                return nil
+            }
+            return event
         }
     }
 
