@@ -89,7 +89,7 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Text("\(store.projects.count) projects · \(store.projects.map(\.sessions.count).reduce(0, +)) sessions")
+                Text("\(store.projects.count) projects · \(store.projects.map(\.sessions.count).reduce(0, +)) sessions · v\(UpdateChecker.currentVersion)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
