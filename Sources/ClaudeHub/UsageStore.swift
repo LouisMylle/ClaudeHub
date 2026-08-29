@@ -6,7 +6,6 @@ import SwiftTerm
 struct UsageWindow: Equatable {
     let percent: Int
     let resets: String
-    /// Only the 5-hour window resets at a clock time we can count down to.
     let resetsAt: Date?
 
     var level: Int { percent >= 85 ? 2 : (percent >= 60 ? 1 : 0) }
@@ -15,8 +14,10 @@ struct UsageWindow: Equatable {
     func countdown(from now: Date) -> String? {
         guard let resetsAt else { return nil }
         let seconds = max(0, Int(resetsAt.timeIntervalSince(now)))
-        let hours = seconds / 3600
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3600
         let minutes = (seconds % 3600) / 60
+        if days > 0 { return "Resets in \(days) d \(hours) hr" }
         if hours > 0 { return "Resets in \(hours) hr \(minutes) min" }
         if minutes > 0 { return "Resets in \(minutes) min" }
         return "Resets in under a minute"
@@ -183,22 +184,50 @@ final class UsageStore: ObservableObject {
         return UsageWindow(percent: percent, resets: text, resetsAt: resetDate(from: text))
     }
 
-    /// Turns a bare "9:29pm" into the next moment the clock reads that. The
-    /// weekly window says "Aug 29 at 4:59pm" instead, which is left as text.
+    /// The panel writes a reset either as a bare "9:29pm" (the 5-hour window)
+    /// or as "Aug 29 at 4:59pm" (the weekly one). Both become a real date so
+    /// either can be counted down to.
     private static func resetDate(from text: String, now: Date = Date()) -> Date? {
-        let compact = text.replacingOccurrences(of: " ", with: "").uppercased()
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "h:mma"
-        guard let time = formatter.date(from: compact) else { return nil }
+        // en_US_POSIX wants "PM", the panel prints "pm". Month names are safe:
+        // none of them contain "am" or "pm".
+        let normalized = text
+            .replacingOccurrences(of: "pm", with: "PM", options: .caseInsensitive)
+            .replacingOccurrences(of: "am", with: "AM", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespaces)
 
         let calendar = Calendar.current
-        let parts = calendar.dateComponents([.hour, .minute], from: time)
-        guard let today = calendar.date(bySettingHour: parts.hour ?? 0,
-                                        minute: parts.minute ?? 0,
-                                        second: 0,
-                                        of: now) else { return nil }
-        return today > now ? today : calendar.date(byAdding: .day, value: 1, to: today)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+
+        for format in ["MMM d 'at' h:mmA", "MMM d 'at' hA", "MMM d 'at' h:mma", "MMM d 'at' ha"] {
+            formatter.dateFormat = format
+            guard let parsed = formatter.date(from: normalized) else { continue }
+            let parts = calendar.dateComponents([.month, .day, .hour, .minute], from: parsed)
+            var target = DateComponents()
+            target.year = calendar.component(.year, from: now)
+            target.month = parts.month
+            target.day = parts.day
+            target.hour = parts.hour
+            target.minute = parts.minute
+            guard let date = calendar.date(from: target) else { continue }
+            // A reset in early January read on New Year's Eve belongs to next year.
+            if date.timeIntervalSince(now) < -2 * 86_400 {
+                return calendar.date(byAdding: .year, value: 1, to: date)
+            }
+            return date
+        }
+
+        for format in ["h:mmA", "hA", "h:mma", "ha"] {
+            formatter.dateFormat = format
+            guard let time = formatter.date(from: normalized) else { continue }
+            let parts = calendar.dateComponents([.hour, .minute], from: time)
+            guard let today = calendar.date(bySettingHour: parts.hour ?? 0,
+                                            minute: parts.minute ?? 0,
+                                            second: 0,
+                                            of: now) else { continue }
+            return today > now ? today : calendar.date(byAdding: .day, value: 1, to: today)
+        }
+        return nil
     }
 
     private static func firstPercent(in line: String) -> Int? {

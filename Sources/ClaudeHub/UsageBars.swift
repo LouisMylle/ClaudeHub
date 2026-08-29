@@ -7,12 +7,13 @@ struct UsageBars: View {
     private static let barWidth: CGFloat = 90
 
     var body: some View {
-        VStack(spacing: 5) {
-            // The 5-hour window is the one you wait on, so it counts down.
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                row("5h", usage.session, trailing: usage.session?.countdown(from: context.date))
+        // Both windows count down; the raw text is only a fallback for a
+        // reset the panel phrased in some way we could not turn into a date.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            VStack(spacing: 5) {
+                row("5h", usage.session, at: context.date)
+                row("Week", usage.week, at: context.date)
             }
-            row("Week", usage.week, trailing: usage.week?.resets)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -30,7 +31,8 @@ struct UsageBars: View {
     }
 
     @ViewBuilder
-    private func row(_ label: String, _ window: UsageWindow?, trailing: String?) -> some View {
+    private func row(_ label: String, _ window: UsageWindow?, at now: Date) -> some View {
+        let trailing = window?.countdown(from: now) ?? window?.resets
         HStack(spacing: 7) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
