@@ -37,6 +37,14 @@ final class AccountStore: ObservableObject {
 
     /// Accounts with a saved token, ready to run without a browser.
     @Published private(set) var tokenProfiles: [String] = TokenStore.profiles
+    /// nil = run as whoever the CLI is signed in as.
+    @Published private(set) var activeProfile: String? = TokenStore.activeProfile
+
+    /// Everything ClaudeHub starts from now on runs as this account.
+    func setActive(_ profile: String?) {
+        TokenStore.activeProfile = profile
+        activeProfile = TokenStore.activeProfile
+    }
 
     private var inFlight = false
 
@@ -51,6 +59,12 @@ final class AccountStore: ObservableObject {
     func removeProfile(_ label: String) {
         TokenStore.delete(label)
         tokenProfiles = TokenStore.profiles
+        activeProfile = TokenStore.activeProfile
+    }
+
+    /// What the sidebar chip shows: the account sessions actually run as.
+    var effectiveLabel: String {
+        activeProfile ?? current?.shortEmail ?? "Sign in"
     }
 
     func refresh() {

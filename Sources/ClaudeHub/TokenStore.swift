@@ -16,6 +16,17 @@ enum TokenStore {
     private static let service = "be.optimize.claudehub.oauth-token"
     private static let indexKey = "tokenProfiles"
 
+    /// The account ClaudeHub runs sessions as. nil means "whoever the CLI is
+    /// signed in as", which is the behaviour without any saved accounts.
+    static var activeProfile: String? {
+        get {
+            guard let value = UserDefaults.standard.string(forKey: "activeProfile"),
+                  profiles.contains(value) else { return nil }
+            return value
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "activeProfile") }
+    }
+
     /// Labels only — the tokens themselves never leave the keychain.
     static var profiles: [String] {
         UserDefaults.standard.stringArray(forKey: indexKey) ?? []
@@ -67,5 +78,6 @@ enum TokenStore {
         ]
         SecItemDelete(query as CFDictionary)
         UserDefaults.standard.set(profiles.filter { $0 != profile }, forKey: indexKey)
+        if activeProfile == profile { activeProfile = nil }
     }
 }

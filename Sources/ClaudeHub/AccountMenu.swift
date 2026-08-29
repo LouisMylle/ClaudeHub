@@ -135,10 +135,8 @@ enum ClaudeCommands {
 
 /// Account items, shared by the menu-bar Claude menu and the sidebar chip.
 ///
-/// One list, ordered by what you actually reach for: the accounts you can drop
-/// into instantly sit at the top, everything else is folded into "More". The
-/// two used to sit side by side as "Start a session as" and "Switch to", which
-/// read like two ways to do the same thing.
+/// One switch, not a per-session choice: picking an account here is what every
+/// session, resume and terminal ClaudeHub starts from then on runs as.
 struct AccountItems: View {
     @ObservedObject var accounts: AccountStore
     @ObservedObject var tabs: TabsModel
@@ -150,19 +148,10 @@ struct AccountItems: View {
     }
 
     var body: some View {
-        Section("Signed in") {
-            Text(accounts.current?.menuLabel ?? accounts.statusMessage ?? "Checking…")
-        }
-
-        Divider()
-
-        if accounts.tokenProfiles.isEmpty {
-            Text("No saved accounts yet")
-        } else {
-            Section("New session as") {
-                ForEach(accounts.tokenProfiles, id: \.self) { profile in
-                    Button(profile) { tabs.openNewSession(profile: profile) }
-                }
+        Section("Sessions run as") {
+            item(label: signedInLabel, profile: nil)
+            ForEach(accounts.tokenProfiles, id: \.self) { profile in
+                item(label: profile, profile: profile)
             }
         }
 
@@ -202,12 +191,41 @@ struct AccountItems: View {
             }
         }
     }
+
+    private var signedInLabel: String {
+        guard let current = accounts.current else { return "Signed-in account" }
+        return "\(current.email) (signed in)"
+    }
+
+    @ViewBuilder
+    private func item(label: String, profile: String?) -> some View {
+        Button {
+            accounts.setActive(profile)
+        } label: {
+            if accounts.activeProfile == profile {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
+        }
+    }
 }
 
 /// Sidebar footer chip — which account am I burning limits on right now.
 struct AccountChip: View {
     @ObservedObject var accounts: AccountStore
     @ObservedObject var tabs: TabsModel
+
+    private var helpText: String {
+        if let active = accounts.activeProfile {
+            return """
+                Sessions run as \(active).
+                Tabs already running keep the account they started with.
+                """
+        }
+        return accounts.current.map { "Sessions run as \($0.email), the signed-in account" }
+            ?? "Not signed in — click to log in"
+    }
 
     var body: some View {
         Menu {
@@ -217,9 +235,9 @@ struct AccountChip: View {
                 Image(systemName: accounts.current == nil
                       ? "person.crop.circle.badge.exclamationmark"
                       : "person.crop.circle")
-                Text(accounts.current?.shortEmail ?? "Sign in")
+                Text(accounts.effectiveLabel)
                     .lineLimit(1)
-                if let plan = accounts.current?.planLabel {
+                if let plan = accounts.activeProfile == nil ? accounts.current?.planLabel : nil {
                     Text(plan)
                         .font(.system(size: 9, weight: .semibold))
                         .padding(.horizontal, 4)
@@ -232,7 +250,6 @@ struct AccountChip: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(accounts.current.map { "Signed in as \($0.email)\nSwitch accounts, or check usage with ⌘U" }
-              ?? "Not signed in — click to log in")
+        .help(helpText)
     }
 }

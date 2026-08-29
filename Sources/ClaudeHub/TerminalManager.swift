@@ -120,7 +120,8 @@ final class TerminalManager: NSObject, ObservableObject {
         // A profile tab runs as its own account: the CLI reads this instead of
         // the signed-in credentials, which is what lets two tabs use two
         // accounts at the same time.
-        if let profile = tab.profile, let token = TokenStore.token(for: profile) {
+        if let profile = tab.profile ?? TokenStore.activeProfile,
+           let token = TokenStore.token(for: profile) {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         }
         let envArray = env.map { "\($0.key)=\($0.value)" }
