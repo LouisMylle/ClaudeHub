@@ -86,6 +86,7 @@ struct ContentView: View {
         }
         .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) { confirmDeletion() }
+                .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) { pendingDeletion = [] }
         } message: {
             Text(deleteMessage)
