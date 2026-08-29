@@ -78,6 +78,11 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// A saved account's limits come from the API, which costs a one-token
+    /// request; the signed-in account's come from reading `/usage`, which costs
+    /// nothing. Worth saying out loud in the tooltip.
+    var readsFromAPI: Bool { TokenStore.activeProfile != nil }
+
     /// Whose limits these are — named, always. The whole confusion this guards
     /// against is a percentage that belongs to another account.
     var accountLabel: String {
@@ -123,8 +128,12 @@ final class UsageStore: ObservableObject {
         // session is the fallback, not the other way round.
         if let profile = TokenStore.activeProfile,
            let token = TokenStore.cachedToken(for: profile) {
-            if !forceNextPoll, let last = lastAPIPoll, session != nil || week != nil,
-               Date().timeIntervalSince(last) < apiInterval {
+            // The reading is a real request, small as it is, so it is not made
+            // on a timer behind a window nobody is looking at.
+            let haveNumbers = session != nil || week != nil
+            if !forceNextPoll, haveNumbers,
+               !NSApplication.shared.isActive
+                   || Date().timeIntervalSince(lastAPIPoll ?? .distantPast) < apiInterval {
                 isProbing = false
                 return
             }

@@ -81,6 +81,9 @@ struct ContentView: View {
             store.refresh()
             // Coming back from the login page in the browser lands here.
             accounts.refresh()
+            // The limits are not polled behind a window nobody is watching, so
+            // coming back to it is when they are worth re-reading.
+            usage.refresh()
         }
         .onChange(of: store.projects) { _, projects in
             // A ⌘N tab is titled after its folder until the transcript exists.
@@ -467,7 +470,7 @@ private struct TabBarView: View {
                             account: terminalManager.profile(of: tab),
                             accountIsLive: terminalManager.hasLaunched(tab.id),
                             fellBackFrom: terminalManager.fallbackAccount(of: tab.id),
-                            pendingAccount: terminalManager.pendingSwitch(of: tab.id),
+                            pending: terminalManager.pendingSwitch(of: tab.id),
                             activate: { tabs.activeTabID = tab.id },
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
@@ -520,9 +523,8 @@ private struct TabChip: View {
     let accountIsLive: Bool
     /// Set when the tab wanted a saved account and had to start without it.
     let fellBackFrom: String?
-    /// Set when the tab was busy at the moment you switched account: it moves
-    /// as soon as it is finished.
-    let pendingAccount: String?
+    /// Set when the tab could not move to the new account yet, and why.
+    let pending: (account: String, waitingOnPaste: Bool)?
     let activate: () -> Void
     let restart: () -> Void
     let close: () -> Void
@@ -549,16 +551,22 @@ private struct TabChip: View {
                 .lineLimit(1)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)
-            if let pendingAccount {
-                Text("→ \(TabsModel.shortLabel(pendingAccount))")
+            if let pending {
+                Text("→ \(TabsModel.shortLabel(pending.account))")
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Color.orange.opacity(0.20), in: Capsule())
-                    .help("""
-                        Busy right now — this conversation moves to \
-                        \(pendingAccount) and resumes as soon as it is done.
-                        """)
+                    .help(pending.waitingOnPaste
+                          ? """
+                            Waiting: the prompt holds pasted content, which only \
+                            this session has — restarting would lose it. Send or \
+                            clear it and this tab moves to \(pending.account).
+                            """
+                          : """
+                            Busy right now — this conversation moves to \
+                            \(pending.account) and resumes as soon as it is done.
+                            """)
             } else if let fellBackFrom {
                 Text("signed in")
                     .font(.system(size: 9, weight: .semibold))

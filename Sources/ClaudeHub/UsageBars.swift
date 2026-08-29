@@ -78,7 +78,14 @@ struct UsageBars: View {
         }
         let seconds = Int(Date().timeIntervalSince(updated))
         let ago = seconds < 60 ? "just now" : "\(seconds / 60) min ago"
-        return "Updated \(ago), and every minute — click ↻ for now"
+        guard usage.readsFromAPI else {
+            return "\(usage.accountLabel) · updated \(ago), and every minute — click ↻ for now"
+        }
+        return """
+            \(usage.accountLabel) · updated \(ago).
+            Read from the API every 3 minutes while ClaudeHub is in front, \
+            with a request of one token. Click ↻ for a reading now.
+            """
     }
 
     @ViewBuilder

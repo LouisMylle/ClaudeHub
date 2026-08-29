@@ -29,9 +29,19 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Text that was typed but not sent when a tab was restarted, waiting for
     /// the new session to be ready to take it back.
     private var pendingDrafts: [String: String] = [:]
-    /// Tabs that were busy when the account changed: they finish what they are
-    /// doing first and move over after. Never interrupted mid-answer.
-    private var deferredSwitches: [String: (tab: TerminalTab, account: String)] = [:]
+    /// Why a tab has not moved to the new account yet.
+    private enum SwitchHold {
+        /// Mid-answer, or waiting on a permission prompt.
+        case busy
+        /// The prompt holds something the screen cannot give back — a paste or
+        /// an image, which Claude Code keeps in memory and only shows as
+        /// `[Pasted text #12 +36 lines]`.
+        case attachment
+    }
+
+    /// Tabs that could not move when the account changed: they move as soon as
+    /// the reason is gone. Nothing is interrupted, and nothing is lost.
+    private var deferredSwitches: [String: (tab: TerminalTab, account: String, hold: SwitchHold)] = [:]
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
@@ -230,7 +240,7 @@ final class TerminalManager: NSObject, ObservableObject {
         if let view = terminals.removeValue(forKey: tab.id), !deadTabs.contains(tab.id) {
             // Switching account restarts the session; what you were halfway
             // through typing should survive that.
-            if let draft = Self.draft(in: Self.visibleText(of: view)) {
+            if let draft = Self.draft(of: view), !Self.holdsAttachment(draft) {
                 pendingDrafts[tab.id] = draft
             }
             view.terminate()
@@ -257,23 +267,49 @@ final class TerminalManager: NSObject, ObservableObject {
         let target = TokenStore.activeProfile ?? "the signed-in account"
         var moved = 0
         for tab in tabs where tab.isConversation {
-            // A session that is working, or waiting for you to answer a
-            // permission prompt, is not something to kill: it finishes, then
-            // moves. Anything idle goes now.
-            if activity(of: tab.id) == .idle || activity(of: tab.id) == .stopped {
+            if let hold = hold(on: tab) {
+                deferredSwitches[tab.id] = (tab, target, hold)
+            } else {
                 relaunch(tab)
                 moved += 1
-            } else {
-                deferredSwitches[tab.id] = (tab, target)
             }
         }
         return moved
     }
 
-    /// The account a tab will move to once it is done, if it was busy when you
-    /// switched.
-    func pendingSwitch(of tabID: String) -> String? {
-        deferredSwitches[tabID]?.account
+    /// What stands in the way of moving this tab right now, if anything.
+    ///
+    /// A session that is working, or waiting for you to answer a permission
+    /// prompt, is not something to kill. Neither is a prompt holding a paste:
+    /// the text of it lives in Claude Code's memory, and the screen shows only
+    /// a summary of it, so a restart would throw the content away and put the
+    /// summary back in its place as if it were what you wrote.
+    private func hold(on tab: TerminalTab) -> SwitchHold? {
+        guard let view = terminals[tab.id], !deadTabs.contains(tab.id) else { return nil }
+        if let draft = Self.draft(of: view), Self.holdsAttachment(draft) {
+            return .attachment
+        }
+        switch activity(of: tab.id) {
+        case .idle, .stopped, .dead: return nil
+        case .busy, .needsInput: return .busy
+        }
+    }
+
+    /// A stand-in on screen for content that is not on screen.
+    ///
+    /// Claude Code writes these several ways — `[Pasted text #12 +36 lines]`,
+    /// `[Image #3]`, `[Image from Claude in Chrome]`, `[Image: …]` — so this
+    /// matches the opening rather than the whole shape of each. A prompt that
+    /// happens to contain the literal text only costs this tab a later switch,
+    /// which is the harmless way to be wrong.
+    private static func holdsAttachment(_ draft: String) -> Bool {
+        draft.contains("[Pasted") || draft.contains("[Image")
+    }
+
+    /// The account a tab will move to once it can, and why it has not yet.
+    func pendingSwitch(of tabID: String) -> (account: String, waitingOnPaste: Bool)? {
+        guard let pending = deferredSwitches[tabID] else { return nil }
+        return (pending.account, pending.hold == .attachment)
     }
 
     /// Moves the tabs that were busy when the account changed, now that they
@@ -285,7 +321,9 @@ final class TerminalManager: NSObject, ObservableObject {
                 deferredSwitches[id] = nil
                 continue
             }
-            guard activity(of: id) == .idle else { continue }
+            // The same test that held it back, asked again: sent the paste, or
+            // finished the answer, and it can move.
+            guard hold(on: pending.tab) == nil else { continue }
             deferredSwitches[id] = nil
             relaunch(pending.tab)
         }
@@ -434,27 +472,64 @@ final class TerminalManager: NSObject, ObservableObject {
         return prompt.text.isEmpty || isPlaceholder(prompt.text)
     }
 
-    /// What has been typed into the prompt but not sent yet.
+    /// What has been typed into the prompt but not sent yet, exactly as typed.
     ///
-    /// Long input wraps onto the lines under the caret, so those are taken too,
-    /// up to the frame the session draws under its input. Where the wrap fell
-    /// is not recoverable from the screen, so the pieces are rejoined with a
-    /// space: the words come back, and a rewrapped sentence is a far better
-    /// outcome than an empty box.
-    static func draft(in screen: String) -> String? {
-        guard let prompt = promptLine(screen),
-              !prompt.text.isEmpty, !isPlaceholder(prompt.text) else { return nil }
-
-        var parts = [prompt.text]
-        for line in prompt.lines.dropFirst(prompt.index + 1) {
-            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \u{2502}"))
-            guard !trimmed.isEmpty, !isFrame(trimmed) else { break }
-            parts.append(trimmed)
+    /// Long input wraps onto the rows under the caret, and the terminal knows
+    /// which of those are a continuation of the row above rather than a line of
+    /// their own. Using that, a wrapped sentence is rejoined with nothing in
+    /// between — no invented spaces — and a real newline is put back as the
+    /// Meta+Enter the prompt takes for one.
+    static func draft(of view: LocalProcessTerminalView) -> String? {
+        let terminal = view.getTerminal()
+        var rows: [(text: String, wrapped: Bool)] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else {
+                rows.append(("", false))
+                continue
+            }
+            // Not trimmed: at a wrap, a trailing space is content, and dropping
+            // it is how "hello world" comes back as "helloworld".
+            rows.append((line.translateToString(trimRight: false), line.isWrapped))
         }
-        let text = parts.joined(separator: " ")
-            .replacingOccurrences(of: "  ", with: " ")
-            .trimmingCharacters(in: .whitespaces)
-        return text.isEmpty ? nil : text
+
+        guard let start = rows.indices.reversed().first(where: { isPromptRow(rows[$0].text) }),
+              let head = promptText(rows[start].text) else { return nil }
+
+        var lines = [head]
+        for row in (start + 1)..<rows.count {
+            let trimmed = rows[row].text.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || isFrame(trimmed) { break }
+            if rows[row].wrapped {
+                lines[lines.count - 1] += rows[row].text
+            } else {
+                lines.append(rows[row].text)
+            }
+        }
+
+        let text = lines
+            .map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            .joined(separator: "\u{1b}\r")     // Meta+Enter: a newline, not a send
+        guard !text.isEmpty, !isPlaceholder(text) else { return nil }
+        return text
+    }
+
+    private static func isPromptRow(_ row: String) -> Bool {
+        let trimmed = row.trimmingCharacters(in: .whitespaces)
+        let unboxed = trimmed.hasPrefix("\u{2502}")
+            ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            : trimmed
+        return unboxed.hasPrefix("\u{276F}") || unboxed.hasPrefix(">")
+    }
+
+    /// The row's content with the caret taken off the front, right-hand padding
+    /// left alone.
+    private static func promptText(_ row: String) -> String? {
+        var text = Substring(row).drop { $0 == " " }
+        if text.first == "\u{2502}" { text = text.dropFirst().drop { $0 == " " } }
+        guard let caret = text.first, caret == "\u{276F}" || caret == ">" else { return nil }
+        text = text.dropFirst()
+        if text.first == " " { text = text.dropFirst() }
+        return String(text)
     }
 
     /// The rules, status line and hints drawn under the input box.
