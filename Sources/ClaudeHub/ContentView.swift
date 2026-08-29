@@ -119,6 +119,7 @@ struct ContentView: View {
                         menu: { projectMenu(project) }
                     )
                 }
+                .textCase(nil)
             }
         }
         .listStyle(.sidebar)
@@ -541,19 +542,31 @@ private struct ProjectHeader<MenuContent: View>: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: "folder.fill")
-                .font(.caption2)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.accentColor)
             Text(project.name)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text("\(project.sessions.count)")
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.primary.opacity(0.08), in: Capsule())
             Spacer()
             Button(action: newSession) {
                 Image(systemName: "plus.circle")
-                    .font(.caption)
+                    .font(.system(size: 12))
             }
             .buttonStyle(.borderless)
             .opacity(isHovering ? 1 : 0)
             .help("New Claude session in \(project.name)")
         }
+        .padding(.top, 12)
+        .padding(.bottom, 3)
         .contentShape(Rectangle())
         // Deferred: setting state straight from a hover callback mutates the
         // row while AppKit is still laying the table out.
