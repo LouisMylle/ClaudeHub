@@ -14,6 +14,8 @@ struct TerminalTab: Identifiable, Hashable {
     let title: String
     let cwd: String
     let kind: TerminalTabKind
+    /// Runs as this saved account instead of the signed-in one (see TokenStore).
+    var profile: String? = nil
 
     var resumeSessionID: String? {
         if case .resume(let id) = kind { return id }
@@ -42,27 +44,32 @@ final class TabsModel: ObservableObject {
         activeTab?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
     }
 
-    func openSession(_ session: ClaudeSession) {
-        if tabs.contains(where: { $0.id == session.id }) {
-            activeTabID = session.id
+    func openSession(_ session: ClaudeSession, profile: String? = nil) {
+        // Same session under another account is a separate tab, not a clash.
+        let id = profile.map { "\(session.id)#\($0)" } ?? session.id
+        if tabs.contains(where: { $0.id == id }) {
+            activeTabID = id
             return
         }
         append(TerminalTab(
-            id: session.id,
-            title: session.title,
+            id: id,
+            title: profile.map { "\(session.title) · \(Self.shortLabel($0))" } ?? session.title,
             cwd: session.cwd,
-            kind: .resume(session.id)
+            kind: .resume(session.id),
+            profile: profile
         ))
     }
 
     /// ⌘N: a fresh Claude session in `cwd` (the current folder by default).
-    func openNewSession(cwd: String? = nil) {
+    func openNewSession(cwd: String? = nil, profile: String? = nil) {
         let folder = cwd ?? currentFolder
+        let name = Self.folderName(folder)
         append(TerminalTab(
             id: "new-\(UUID().uuidString)",
-            title: "New session · \(Self.folderName(folder))",
+            title: profile.map { "\(name) · \(Self.shortLabel($0))" } ?? "New session · \(name)",
             cwd: folder,
-            kind: .newSession
+            kind: .newSession,
+            profile: profile
         ))
     }
 
@@ -117,6 +124,10 @@ final class TabsModel: ObservableObject {
     private func append(_ tab: TerminalTab) {
         tabs.append(tab)
         activeTabID = tab.id
+    }
+
+    static func shortLabel(_ profile: String) -> String {
+        profile.split(separator: "@").first.map(String.init) ?? profile
     }
 
     private static func folderName(_ path: String) -> String {

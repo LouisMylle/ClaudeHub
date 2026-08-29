@@ -35,7 +35,23 @@ final class AccountStore: ObservableObject {
     @Published private(set) var knownEmails: [String] =
         UserDefaults.standard.stringArray(forKey: "knownAccountEmails") ?? []
 
+    /// Accounts with a saved token, ready to run without a browser.
+    @Published private(set) var tokenProfiles: [String] = TokenStore.profiles
+
     private var inFlight = false
+
+    @discardableResult
+    func addProfile(_ label: String, token: String) -> Bool {
+        guard TokenStore.save(token: token, for: label) else { return false }
+        tokenProfiles = TokenStore.profiles
+        remember(label)
+        return true
+    }
+
+    func removeProfile(_ label: String) {
+        TokenStore.delete(label)
+        tokenProfiles = TokenStore.profiles
+    }
 
     func refresh() {
         guard !inFlight else { return }

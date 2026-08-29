@@ -31,6 +31,7 @@ struct ClaudeHubApp: App {
     @StateObject private var store = SessionStore()
     @StateObject private var tabs = TabsModel()
     @StateObject private var accounts = AccountStore()
+    @StateObject private var usage = UsageStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -38,6 +39,7 @@ struct ClaudeHubApp: App {
                 .environmentObject(store)
                 .environmentObject(tabs)
                 .environmentObject(accounts)
+                .environmentObject(usage)
         }
         .defaultSize(width: 1200, height: 760)
         .commands {
@@ -68,6 +70,7 @@ struct ClaudeHubApp: App {
                 Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
                     .keyboardShortcut("u", modifiers: .command)
                     .disabled(!ClaudeCommands.canSend(tabs))
+                Button("Refresh Limits") { usage.refresh() }
                 Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
                     .disabled(!ClaudeCommands.canSend(tabs))
                 Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
@@ -97,10 +100,10 @@ struct ClaudeHubApp: App {
 
 /// The File menu. A view (rather than inline buttons) so it can reach
 /// `openWindow` for "New Window", which `.newItem` no longer provides.
+///
+/// Plain references, not @ObservedObject: these commands only call methods,
+/// they show no state, so there is nothing to observe.
 private struct NewItemCommands: View {
-    // Plain references, not @ObservedObject: these commands only call methods,
-    // they show no state. Observing would rebuild the File menu on every
-    // session scan, which re-enters the sidebar's layout.
     let store: SessionStore
     let tabs: TabsModel
     @Environment(\.openWindow) private var openWindow

@@ -104,6 +104,12 @@ final class TerminalManager: NSObject, ObservableObject {
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
+        // A profile tab runs as its own account: the CLI reads this instead of
+        // the signed-in credentials, which is what lets two tabs use two
+        // accounts at the same time.
+        if let profile = tab.profile, let token = TokenStore.token(for: profile) {
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        }
         let envArray = env.map { "\($0.key)=\($0.value)" }
 
         switch tab.kind {

@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var store: SessionStore
     @EnvironmentObject var tabs: TabsModel
     @EnvironmentObject var accounts: AccountStore
+    @EnvironmentObject var usage: UsageStore
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var updates = UpdateChecker.shared
     @Environment(\.colorScheme) private var colorScheme
@@ -59,7 +60,11 @@ struct ContentView: View {
             store.refresh()
             accounts.refresh()
             updates.check()
+            // The probe needs a folder Claude Code already trusts, so it waits
+            // for the first scan — off the sidebar's own update cycle.
+            usage.startPolling { store.projects.first?.path }
         }
+
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
             // Coming back from the login page in the browser lands here.
@@ -120,8 +125,10 @@ struct ContentView: View {
         .searchable(text: $searchText, placement: .sidebar, prompt: "Search sessions")
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                AccountChip(accounts: accounts, tabs: tabs)
+            VStack(spacing: 0) {
+                UsageBars(usage: usage)
+                HStack {
+                    AccountChip(accounts: accounts, tabs: tabs)
                 Spacer()
                 Text("\(store.projects.map(\.sessions.count).reduce(0, +)) sessions")
                     .font(.caption)
@@ -157,8 +164,9 @@ struct ContentView: View {
                           : "Show \(store.hiddenSessionIDs.count) hidden sessions")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
             .background(.bar)
         }
         .toolbar {
@@ -262,6 +270,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private func sessionMenu(_ session: ClaudeSession) -> some View {
+        if !accounts.tokenProfiles.isEmpty {
+            Menu("Resume as") {
+                ForEach(accounts.tokenProfiles, id: \.self) { profile in
+                    Button(profile) { tabs.openSession(session, profile: profile) }
+                }
+            }
+            Divider()
+        }
         Button("New Session in This Folder") { newSession(in: session.cwd) }
         Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
         Divider()

@@ -20,7 +20,8 @@ resumes in an embedded terminal, in the right folder, instantly.
 
 > Fork of [LouisMylle/ClaudeHub](https://github.com/LouisMylle/ClaudeHub),
 > adding session deletion, one-key ways to start a new session or terminal,
-> account switching with usage shortcuts, and live per-session status dots.
+> instant multi-account switching, always-visible usage limits, and live
+> per-session status dots.
 
 ## Why
 
@@ -47,8 +48,15 @@ off.
   you into another: ClaudeHub remembers the addresses you use and hands the
   login to `claude auth login --email …`, so the real browser flow runs and no
   credential is ever stored by the app
-- 📊 **Usage at a glance** — `⌘U` drops `/usage` into the session you are
-  looking at; `/status`, `/context` and `/model` are one menu item away
+- 📊 **Limits always on screen** — two bars in the sidebar footer show your
+  5-hour and weekly usage with the reset time, green through red, refreshed
+  every 10 minutes. `⌘U` still drops `/usage` into the session you are looking
+  at; `/status`, `/context` and `/model` are one menu item away
+- ⚡ **Instant account switching** — save a `claude setup-token` token per
+  account and start a session as any of them with no browser and no code.
+  Tokens travel per session, so **two tabs can run as two accounts at once** —
+  hit a limit on one, carry on in the other without signing anything out.
+  Right-click a session to *Resume as* another account
 - 🟢 **Live status dots** — green when a session waits on you, pulsing amber
   while Claude is working, pulsing blue when a permission prompt needs an
   answer. Scan the sidebar to see which session wants you
@@ -131,10 +139,25 @@ command without `--resume`. Deleting a chat moves its `.jsonl`, its sidecar
 nothing is unlinked outright.
 
 Accounts are read with `claude auth status --json` and changed with
-`claude auth login` / `logout` in a visible tab, so ClaudeHub never touches a
-token or the keychain. Note that logging in swaps the account for the `claude`
+`claude auth login` / `logout` in a visible tab, so ClaudeHub never reads Claude
+Code's own credentials. Note that logging in swaps the account for the `claude`
 CLI everywhere, not just in ClaudeHub; sessions already running keep their
 current credentials until they re-authenticate.
+
+Instant switching works differently, and better: you mint a token with
+`claude setup-token` and hand it to ClaudeHub, which keeps it in your login
+keychain and passes it to sessions you start as that account through
+`CLAUDE_CODE_OAUTH_TOKEN`. Because that is per-process, a tab can run as an
+account you are not signed in as, and several accounts can run side by side —
+which `/login` cannot do, since it changes the one account the CLI uses
+machine-wide. Forgetting a profile deletes the keychain item; revoke the token
+itself at claude.ai to kill it for good. ClaudeHub is ad-hoc signed, so macOS
+asks permission for the keychain item again after each rebuild.
+
+The limit bars come from `/usage`. Those numbers live only in the API's
+responses, so ClaudeHub asks the same way you would: it starts a `claude`
+session off-screen, sends `/usage`, reads the panel and quits. The probe runs no
+prompt, so it costs nothing and leaves no transcript behind.
 
 Claude Code exposes no "am I busy" signal, so the status dots read the session's
 own screen: it prints an `esc to interrupt` hint while it works, and permission
