@@ -18,6 +18,9 @@ resumes in an embedded terminal, in the right folder, instantly.
 
 </div>
 
+> Fork of [LouisMylle/ClaudeHub](https://github.com/LouisMylle/ClaudeHub),
+> adding session deletion and one-key ways to start a new session or terminal.
+
 ## Why
 
 Getting back into a Claude Code session means remembering where it lived,
@@ -33,8 +36,14 @@ off.
 - ⚡ **One-click resume** — opens the session in an embedded terminal
   ([SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)), already in the
   right folder
-- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch.
-  `⌘T` opens a plain shell in the current project's folder
+- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch
+- ✨ **Start a new chat anywhere** — `⌘N` starts a fresh Claude session in the
+  current folder, `⇧⌘N` in any folder you pick; the `+` in the toolbar also
+  lists your projects, and every project row has its own `+`. `⌘T` opens a
+  plain shell in the same folder
+- 🗑️ **Delete sessions** — remove a chat (or every chat in a project) for good
+  from the context menu or with `⌫`. Transcript, tool results, and session env
+  go to the **Trash**, so a mis-click is recoverable in Finder
 - 🔌 **MCP manager** — see every configured MCP server across user, project
   (`.mcp.json`), and local scopes; add and remove them from the UI (backed by
   the `claude mcp` CLI, so config stays canonical)
@@ -52,7 +61,7 @@ off.
 ### Download
 
 1. Grab the latest `ClaudeHub-x.y.z.zip` from
-   [Releases](https://github.com/LouisMylle/ClaudeHub/releases/latest)
+   [Releases](https://github.com/gillesravyse/ClaudeHub/releases/latest)
 2. Unzip and drag `ClaudeHub.app` into `/Applications`
 3. The app is ad-hoc signed (not notarized), so macOS quarantines it on first
    download. Clear it once:
@@ -67,7 +76,7 @@ ClaudeHub is a front-end for it.
 ### Build from source
 
 ```sh
-git clone https://github.com/LouisMylle/ClaudeHub.git
+git clone https://github.com/gillesravyse/ClaudeHub.git
 cd ClaudeHub
 ./build_app.sh --install   # builds and copies to /Applications
 ```
@@ -80,7 +89,12 @@ package.
 | Keys | Action |
 | --- | --- |
 | `⇧↩` | Newline in the Claude Code prompt (instead of submitting) |
+| `⌘N` | New Claude session in the current folder |
+| `⇧⌘N` | New Claude session in a folder you pick |
 | `⌘T` | New shell tab in the current folder |
+| `⌥⌘N` | New window |
+| `⌫` | Delete the selected session (asks first) |
+| `⌘⌫` | Same, from the Edit menu |
 | `⌘W` | Close tab |
 | `⇧⌘W` | Close window |
 | `⌘1`–`⌘9` | Jump to tab |
@@ -98,7 +112,10 @@ subagent sidechains are filtered out. Selecting a session spawns
 zsh -l -c "cd <cwd> && exec claude --resume <session-id>"
 ```
 
-inside a SwiftTerm view that stays alive per tab. MCP servers are read from
+inside a SwiftTerm view that stays alive per tab; a new session is the same
+command without `--resume`. Deleting a chat moves its `.jsonl`, its sidecar
+`<session-id>/` folder, and `~/.claude/session-env/<session-id>` to the Trash —
+nothing is unlinked outright. MCP servers are read from
 `~/.claude.json` and per-project `.mcp.json` files; all mutations go through
 `claude mcp add` / `claude mcp remove` so ClaudeHub never hand-edits your
 config.

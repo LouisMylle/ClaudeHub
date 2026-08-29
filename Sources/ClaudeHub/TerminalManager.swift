@@ -95,15 +95,13 @@ final class TerminalManager: NSObject, ObservableObject {
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
         let envArray = env.map { "\($0.key)=\($0.value)" }
 
-        if let sessionID = tab.resumeSessionID {
-            let command = "cd \(ClaudeSession.shellQuote(tab.cwd)) && exec \(ClaudeSession.shellQuote(claudePath)) --resume \(ClaudeSession.shellQuote(sessionID))"
-            view.startProcess(
-                executable: "/bin/zsh",
-                args: ["-l", "-c", command],
-                environment: envArray,
-                execName: nil
-            )
-        } else {
+        switch tab.kind {
+        case .resume(let sessionID):
+            start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath)) --resume \(ClaudeSession.shellQuote(sessionID))", in: tab.cwd)
+        case .newSession:
+            // ⌘N — a fresh Claude session in the tab's folder
+            start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath))", in: tab.cwd)
+        case .shell:
             // Plain interactive shell in the tab's folder (⌘T)
             view.startProcess(
                 executable: "/bin/zsh",
@@ -117,6 +115,16 @@ final class TerminalManager: NSObject, ObservableObject {
         deadTabs.remove(tab.id)
         terminals[tab.id] = view
         return view
+    }
+
+    /// A login shell gives `claude` the same PATH the user's terminal has.
+    private func start(_ view: LocalProcessTerminalView, _ env: [String], _ command: String, in cwd: String) {
+        view.startProcess(
+            executable: "/bin/zsh",
+            args: ["-l", "-c", "cd \(ClaudeSession.shellQuote(cwd)) && \(command)"],
+            environment: env,
+            execName: nil
+        )
     }
 
     /// Restart a tab whose process ended.

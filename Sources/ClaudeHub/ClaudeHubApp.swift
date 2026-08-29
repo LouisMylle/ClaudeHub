@@ -1,5 +1,13 @@
 import SwiftUI
 
+extension Notification.Name {
+    /// Menu → "New Session in Folder…": the folder picker lives in the window
+    /// that has the tabs, so the command just asks for it.
+    static let newClaudeSessionInFolder = Notification.Name("ClaudeHub.newSessionInFolder")
+    /// Menu → "Delete Session": acted on by the window holding the selection.
+    static let deleteSelectedSession = Notification.Name("ClaudeHub.deleteSelectedSession")
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let running = TerminalManager.shared.runningCount
@@ -24,7 +32,7 @@ struct ClaudeHubApp: App {
     @StateObject private var tabs = TabsModel()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(tabs)
@@ -34,11 +42,15 @@ struct ClaudeHubApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { UpdateChecker.shared.check() }
             }
-            CommandGroup(after: .newItem) {
-                Button("New Tab") { tabs.openNewTab() }
-                    .keyboardShortcut("t", modifiers: .command)
-                Button("Refresh Sessions") { store.refresh() }
-                    .keyboardShortcut("r", modifiers: .command)
+            CommandGroup(replacing: .newItem) {
+                NewItemCommands(store: store, tabs: tabs)
+            }
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Delete Session…") {
+                    NotificationCenter.default.post(name: .deleteSelectedSession, object: nil)
+                }
+                .keyboardShortcut(.delete, modifiers: .command)
             }
             // Take over ⌘W: close the active tab, not the window
             CommandGroup(replacing: .saveItem) {
@@ -58,5 +70,37 @@ struct ClaudeHubApp: App {
                 }
             }
         }
+    }
+}
+
+/// The File menu. A view (rather than inline buttons) so it can reach
+/// `openWindow` for "New Window", which `.newItem` no longer provides.
+private struct NewItemCommands: View {
+    @ObservedObject var store: SessionStore
+    @ObservedObject var tabs: TabsModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("New Claude Session") {
+            tabs.openNewSession()
+            store.refreshSoon()
+        }
+        .keyboardShortcut("n", modifiers: .command)
+
+        Button("New Claude Session in Folder…") {
+            NotificationCenter.default.post(name: .newClaudeSessionInFolder, object: nil)
+        }
+        .keyboardShortcut("n", modifiers: [.command, .shift])
+
+        Button("New Terminal Tab") { tabs.openNewTab() }
+            .keyboardShortcut("t", modifiers: .command)
+
+        Divider()
+
+        Button("New Window") { openWindow(id: "main") }
+            .keyboardShortcut("n", modifiers: [.command, .option])
+
+        Button("Refresh Sessions") { store.refresh() }
+            .keyboardShortcut("r", modifiers: .command)
     }
 }

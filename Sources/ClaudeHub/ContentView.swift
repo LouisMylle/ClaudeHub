@@ -10,6 +10,9 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var showMCPManager = false
     @State private var showHiddenSessions = false
+    @State private var pendingDeletion: [ClaudeSession] = []
+    @State private var deletionScope = ""
+    @State private var deleteError: String?
 
     /// Matches the SwiftTerm palette background in TerminalManager.
     private var terminalBackground: SwiftUI.Color {
@@ -66,6 +69,26 @@ struct ContentView: View {
             // Keep the sidebar in sync with the active tab (nil for fresh-session tabs)
             selectedSessionID = tabs.activeTab?.resumeSessionID
         }
+        .onReceive(NotificationCenter.default.publisher(for: .newClaudeSessionInFolder)) { _ in
+            newSessionInChosenFolder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deleteSelectedSession)) { _ in
+            requestDeletionOfSelection()
+        }
+        .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive) { confirmDeletion() }
+            Button("Cancel", role: .cancel) { pendingDeletion = [] }
+        } message: {
+            Text(deleteMessage)
+        }
+        .alert("Could not delete", isPresented: Binding(
+            get: { deleteError != nil },
+            set: { if !$0 { deleteError = nil } }
+        )) {
+            Button("OK", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "")
+        }
     }
 
     private var sidebar: some View {
@@ -80,11 +103,16 @@ struct ContentView: View {
                             .contextMenu { sessionMenu(session) }
                     }
                 } header: {
-                    ProjectHeader(project: project)
+                    ProjectHeader(
+                        project: project,
+                        newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
+                        menu: { projectMenu(project) }
+                    )
                 }
             }
         }
         .listStyle(.sidebar)
+        .onDeleteCommand { requestDeletionOfSelection() }
         .searchable(text: $searchText, placement: .sidebar, prompt: "Search sessions")
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
@@ -129,6 +157,28 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem {
+                Menu {
+                    Button("New Session in Current Folder") { newSession() }
+                        .disabled(tabs.activeTab == nil)
+                    Button("New Session in Folder…") { newSessionInChosenFolder() }
+                    Button("New Terminal Tab") { tabs.openNewTab() }
+                    if !store.projects.isEmpty {
+                        Divider()
+                        Section("Start in project") {
+                            ForEach(store.projects.prefix(10)) { project in
+                                Button(project.name) { newSession(in: project.path) }
+                                    .help(project.path)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("New Session", systemImage: "plus")
+                } primaryAction: {
+                    if tabs.activeTab == nil { newSessionInChosenFolder() } else { newSession() }
+                }
+                .help("Start a new Claude session (⌘N) — hold for more options")
+            }
+            ToolbarItem {
                 Button {
                     showMCPManager = true
                 } label: {
@@ -156,7 +206,8 @@ struct ContentView: View {
     private var detail: some View {
         if let tab = tabs.activeTab {
             VStack(spacing: 0) {
-                TabBarView()
+                TabBarView(newSession: { newSession() },
+                           newSessionElsewhere: { newSessionInChosenFolder() })
                 Divider()
                 TerminalHostView(tab: tab, generation: terminalManager.generation)
                     .background(terminalBackground)
@@ -167,13 +218,46 @@ struct ContentView: View {
             ContentUnavailableView {
                 Label("ClaudeHub", systemImage: "terminal")
             } description: {
-                Text("Select a session to resume it right here.\n⌘T opens a terminal tab in the current folder.")
+                Text("Pick a session in the sidebar to resume it right here,\nor start a fresh one.")
+            } actions: {
+                HStack {
+                    Button("New Session…") { newSessionInChosenFolder() }
+                        .buttonStyle(.borderedProminent)
+                    if let recent = store.projects.first {
+                        Button("New Session in \(recent.name)") { newSession(in: recent.path) }
+                    }
+                }
             }
         }
     }
 
+    // MARK: - Starting sessions
+
+    private func newSession(in folder: String? = nil) {
+        tabs.openNewSession(cwd: folder)
+        store.refreshSoon()
+    }
+
+    /// ⇧⌘N — pick any folder on disk, no existing session needed.
+    private func newSessionInChosenFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the folder for the new Claude session"
+        panel.prompt = "Start Session"
+        panel.directoryURL = URL(fileURLWithPath: tabs.currentFolder)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        newSession(in: url.path)
+    }
+
+    // MARK: - Menus
+
     @ViewBuilder
     private func sessionMenu(_ session: ClaudeSession) -> some View {
+        Button("New Session in This Folder") { newSession(in: session.cwd) }
+        Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
+        Divider()
         Button("Open in Terminal.app") { openInTerminalApp(session) }
         Button("Reveal Folder in Finder") {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: session.cwd)
@@ -196,6 +280,77 @@ struct ContentView: View {
                 store.setHidden(session, true)
             }
         }
+        Button("Delete Session…", role: .destructive) {
+            requestDeletion([session], scope: "“\(session.title)”")
+        }
+    }
+
+    @ViewBuilder
+    private func projectMenu(_ project: ClaudeProject) -> some View {
+        Button("New Session in This Project") { newSession(in: project.path) }
+        Button("New Terminal in This Project") { tabs.openNewTab(cwd: project.path) }
+        Divider()
+        Button("Reveal in Finder") {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
+        }
+        Button("Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(project.path, forType: .string)
+        }
+        Divider()
+        Button("Delete All Sessions in \(project.name)…", role: .destructive) {
+            requestDeletion(project.sessions, scope: "all \(project.sessions.count) sessions in \(project.name)")
+        }
+    }
+
+    // MARK: - Deleting
+
+    private var deleteConfirmationBinding: Binding<Bool> {
+        Binding(get: { !pendingDeletion.isEmpty }, set: { if !$0 { pendingDeletion = [] } })
+    }
+
+    private var deleteTitle: String {
+        pendingDeletion.count == 1 ? "Delete this session?" : "Delete \(pendingDeletion.count) sessions?"
+    }
+
+    private var deleteMessage: String {
+        let running = pendingDeletion.filter { terminalManager.isRunning($0.id) }.count
+        var text = "Deleting \(deletionScope) moves the transcript to the Trash. "
+            + "The chat disappears from ClaudeHub and can no longer be resumed."
+        if running > 0 {
+            text += running == 1
+                ? "\n\nIts open tab will be closed and the running process ended."
+                : "\n\n\(running) open tabs will be closed and their running processes ended."
+        }
+        return text
+    }
+
+    private func requestDeletion(_ sessions: [ClaudeSession], scope: String) {
+        guard !sessions.isEmpty else { return }
+        deletionScope = scope
+        pendingDeletion = sessions
+    }
+
+    /// The ⌫ key on the focused sidebar row.
+    private func requestDeletionOfSelection() {
+        guard let id = selectedSessionID, let session = session(withID: id) else { return }
+        requestDeletion([session], scope: "“\(session.title)”")
+    }
+
+    private func confirmDeletion() {
+        let sessions = pendingDeletion
+        pendingDeletion = []
+        guard !sessions.isEmpty else { return }
+
+        let ids = Set(sessions.map(\.id))
+        tabs.closeTabs(forSessionIDs: ids)
+        if let selected = selectedSessionID, ids.contains(selected) { selectedSessionID = nil }
+
+        let failed = store.delete(sessions)
+        guard !failed.isEmpty else { return }
+        deleteError = failed.count == 1
+            ? "“\(failed[0].title)” could not be moved to the Trash. Check the file's permissions."
+            : "\(failed.count) sessions could not be moved to the Trash. Check the files' permissions."
     }
 
     private func openInTerminalApp(_ session: ClaudeSession) {
@@ -219,6 +374,8 @@ struct ContentView: View {
 private struct TabBarView: View {
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
+    let newSession: () -> Void
+    let newSessionElsewhere: () -> Void
 
     var body: some View {
         HStack(spacing: 4) {
@@ -237,13 +394,19 @@ private struct TabBarView: View {
                 }
                 .padding(.vertical, 5)
             }
-            Button {
-                tabs.openNewTab()
+            Menu {
+                Button("New Session Here") { newSession() }
+                Button("New Session in Folder…") { newSessionElsewhere() }
+                Button("New Terminal Here") { tabs.openNewTab() }
             } label: {
                 Image(systemName: "plus")
+            } primaryAction: {
+                newSession()
             }
-            .buttonStyle(.borderless)
-            .help("New terminal tab in the current folder (⌘T)")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New Claude session in this folder (⌘N) — hold for a terminal tab or another folder")
             .padding(.trailing, 8)
         }
         .padding(.leading, 8)
@@ -268,10 +431,14 @@ private struct TabChip: View {
                 }
                 .buttonStyle(.plain)
                 .help("Session ended — restart")
-            } else {
+            } else if tab.isClaude {
                 Circle()
                     .fill(isActive ? Color.green : Color.secondary.opacity(0.5))
                     .frame(width: 6, height: 6)
+            } else {
+                Image(systemName: "terminal")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
             Text(tab.title)
                 .font(.callout)
@@ -333,15 +500,29 @@ private struct SessionRow: View {
     }
 }
 
-private struct ProjectHeader: View {
+private struct ProjectHeader<MenuContent: View>: View {
     let project: ClaudeProject
+    let newSession: () -> Void
+    @ViewBuilder let menu: () -> MenuContent
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "folder.fill")
                 .font(.caption2)
             Text(project.name)
+            Spacer()
+            Button(action: newSession) {
+                Image(systemName: "plus.circle")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .opacity(isHovering ? 1 : 0)
+            .help("New Claude session in \(project.name)")
         }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .help(project.path)
+        .contextMenu { menu() }
     }
 }

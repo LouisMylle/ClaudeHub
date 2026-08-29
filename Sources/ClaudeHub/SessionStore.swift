@@ -21,6 +21,14 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// A brand-new session only lands on disk once Claude has written its
+    /// first lines — give it a moment, then pick it up in the sidebar.
+    func refreshSoon(after seconds: TimeInterval = 6) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            self?.refresh()
+        }
+    }
+
     /// Hidden sessions stay on disk (still resumable), they just leave the list.
     @Published var hiddenSessionIDs: Set<String> =
         Set(UserDefaults.standard.stringArray(forKey: "hiddenSessionIDs") ?? [])
@@ -31,7 +39,58 @@ final class SessionStore: ObservableObject {
         } else {
             hiddenSessionIDs.remove(session.id)
         }
+        persistHidden()
+    }
+
+    private func persistHidden() {
         UserDefaults.standard.set(Array(hiddenSessionIDs), forKey: "hiddenSessionIDs")
+    }
+
+    // MARK: - Deleting
+
+    /// Deletes sessions for real: the transcript and its sidecar files go to
+    /// the Trash, so a mis-click stays recoverable in Finder.
+    /// Returns the sessions that could not be deleted.
+    @discardableResult
+    func delete(_ sessions: [ClaudeSession]) -> [ClaudeSession] {
+        var deleted: Set<String> = []
+        var failed: [ClaudeSession] = []
+
+        for session in sessions {
+            if Self.trashArtifacts(of: session) {
+                deleted.insert(session.id)
+            } else {
+                failed.append(session)
+            }
+        }
+
+        guard !deleted.isEmpty else { return failed }
+
+        projects = projects.compactMap { project in
+            var copy = project
+            copy.sessions.removeAll { deleted.contains($0.id) }
+            return copy.sessions.isEmpty ? nil : copy
+        }
+        if !hiddenSessionIDs.isDisjoint(with: deleted) {
+            hiddenSessionIDs.subtract(deleted)
+            persistHidden()
+        }
+        return failed
+    }
+
+    /// The transcript is what makes a session resumable — if that fails to
+    /// move, the delete failed. The sidecars are best-effort cleanup.
+    private static func trashArtifacts(of session: ClaudeSession) -> Bool {
+        let fm = FileManager.default
+        do {
+            try fm.trashItem(at: session.fileURL, resultingItemURL: nil)
+        } catch {
+            return false
+        }
+        for url in session.artifactURLs.dropFirst() where fm.fileExists(atPath: url.path) {
+            try? fm.trashItem(at: url, resultingItemURL: nil)
+        }
+        return true
     }
 
     private static func scan(root: URL) -> [ClaudeProject] {
