@@ -134,63 +134,70 @@ enum ClaudeCommands {
 }
 
 /// Account items, shared by the menu-bar Claude menu and the sidebar chip.
-/// Shortcuts live in the menu bar only, so nothing is bound twice.
+///
+/// One list, ordered by what you actually reach for: the accounts you can drop
+/// into instantly sit at the top, everything else is folded into "More". The
+/// two used to sit side by side as "Start a session as" and "Switch to", which
+/// read like two ways to do the same thing.
 struct AccountItems: View {
     @ObservedObject var accounts: AccountStore
     @ObservedObject var tabs: TabsModel
 
+    private var withoutToken: [String] {
+        accounts.knownEmails.filter {
+            $0 != accounts.current?.email && !accounts.tokenProfiles.contains($0)
+        }
+    }
+
     var body: some View {
         Section("Signed in") {
-            if let current = accounts.current {
-                Text(current.menuLabel)
-                if let org = current.orgName { Text(org) }
-            } else {
-                Text(accounts.statusMessage ?? "Checking…")
-            }
+            Text(accounts.current?.menuLabel ?? accounts.statusMessage ?? "Checking…")
         }
 
         Divider()
 
-        if !accounts.tokenProfiles.isEmpty {
-            Section("Start a session as") {
+        if accounts.tokenProfiles.isEmpty {
+            Text("No saved accounts yet")
+        } else {
+            Section("New session as") {
                 ForEach(accounts.tokenProfiles, id: \.self) { profile in
                     Button(profile) { tabs.openNewSession(profile: profile) }
                 }
             }
         }
-        Button("Add Account for Instant Switching…") {
+
+        Divider()
+
+        Button("Add Account…") {
             ClaudeCommands.addProfile(accounts: accounts, tabs: tabs)
         }
 
-        Divider()
-
-        let others = accounts.knownEmails.filter { $0 != accounts.current?.email }
-        if !others.isEmpty {
-            Section("Switch to") {
-                ForEach(others, id: \.self) { email in
-                    Button(email) { ClaudeCommands.logIn(as: email, accounts: accounts, tabs: tabs) }
+        Menu("More") {
+            Button("Sign In with Browser…") {
+                ClaudeCommands.logIn(as: nil, accounts: accounts, tabs: tabs)
+            }
+            ForEach(withoutToken, id: \.self) { email in
+                Button("Sign In as \(email)…") {
+                    ClaudeCommands.logIn(as: email, accounts: accounts, tabs: tabs)
                 }
             }
-        }
-        Button("Sign In to Another Account…") {
-            ClaudeCommands.promptForNewAccount(accounts: accounts, tabs: tabs)
-        }
 
-        Divider()
-
-        Button("Re-check Account") { accounts.refresh() }
-        Button("Log Out…") { ClaudeCommands.logOut(accounts: accounts, tabs: tabs) }
-
-        if !others.isEmpty || !accounts.tokenProfiles.isEmpty {
             Divider()
-            Menu("Forget") {
-                ForEach(accounts.tokenProfiles, id: \.self) { profile in
-                    Button("\(profile) (saved token)") {
-                        ClaudeCommands.removeProfile(profile, accounts: accounts)
+
+            Button("Re-check Account") { accounts.refresh() }
+            Button("Log Out…") { ClaudeCommands.logOut(accounts: accounts, tabs: tabs) }
+
+            if !accounts.tokenProfiles.isEmpty || !withoutToken.isEmpty {
+                Divider()
+                Menu("Forget") {
+                    ForEach(accounts.tokenProfiles, id: \.self) { profile in
+                        Button("\(profile) (saved account)") {
+                            ClaudeCommands.removeProfile(profile, accounts: accounts)
+                        }
                     }
-                }
-                ForEach(others, id: \.self) { email in
-                    Button(email) { accounts.forget(email) }
+                    ForEach(withoutToken, id: \.self) { email in
+                        Button(email) { accounts.forget(email) }
+                    }
                 }
             }
         }

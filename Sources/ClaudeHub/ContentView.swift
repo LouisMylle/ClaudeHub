@@ -226,6 +226,10 @@ struct ContentView: View {
                            newSessionElsewhere: { newSessionInChosenFolder() },
                            accounts: accounts)
                 Divider()
+                if tab.isCommand, let link = terminalManager.signInURL(in: tab.id) {
+                    SignInLinkBar(url: link)
+                    Divider()
+                }
                 TerminalHostView(tab: tab, generation: terminalManager.generation)
                     .background(terminalBackground)
             }
@@ -503,6 +507,42 @@ private struct TabChip: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: activate)
+    }
+}
+
+/// The login URL a `claude auth` tab prints is hard-wrapped across three lines
+/// and cmd-clicking it goes straight to the browser, so there is no way to just
+/// copy it. This lifts it out whole.
+private struct SignInLinkBar: View {
+    let url: String
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "link")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+            Text(url)
+                .font(.system(size: 11).monospaced())
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Button(copied ? "Copied" : "Copy Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+            }
+            if let destination = URL(string: url) {
+                Button("Open") { NSWorkspace.shared.open(destination) }
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.10))
     }
 }
 

@@ -209,6 +209,31 @@ final class TerminalManager: NSObject, ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    /// The login URL a `claude auth` tab prints, rejoined.
+    ///
+    /// The terminal hard-wraps it across three lines with no hyphen, and
+    /// cmd-clicking it just opens the browser — so this stitches the pieces
+    /// back together for the clipboard. Continuation lines are the ones with
+    /// no spaces in them.
+    func signInURL(in tabID: String) -> String? {
+        guard let view = terminals[tabID] else { return nil }
+        let lines = Self.visibleText(of: view)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let index = lines.lastIndex(where: { $0.contains("https://") }),
+              let start = lines[index].range(of: "https://") else { return nil }
+
+        var url = String(lines[index][start.lowerBound...]).trimmingCharacters(in: .whitespaces)
+        var next = index + 1
+        while next < lines.count {
+            let line = lines[next].trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.contains(" ") else { break }
+            url += line
+            next += 1
+        }
+        return url.count > 30 ? url : nil
+    }
+
     // MARK: - Slash commands
 
     /// Types a slash command into a session. Only presses Return when the

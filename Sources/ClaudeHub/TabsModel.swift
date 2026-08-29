@@ -22,6 +22,12 @@ struct TerminalTab: Identifiable, Hashable {
         return nil
     }
 
+    /// A one-shot `claude …` tab (auth login, setup-token).
+    var isCommand: Bool {
+        if case .command = kind { return true }
+        return false
+    }
+
     /// A live Claude conversation — the tabs slash commands can be sent to.
     var isConversation: Bool {
         switch kind {
