@@ -18,6 +18,20 @@ final class TerminalManager: NSObject, ObservableObject {
     private var activityTimer: Timer?
 
     private var terminals: [String: LocalProcessTerminalView] = [:]
+    /// The saved account each live terminal was actually launched with (nil =
+    /// the signed-in one). A tab keeps the account it started on, so this is
+    /// the only honest answer to "what am I burning limits on in this tab".
+    private var launchedProfile: [String: String] = [:]
+    /// Tabs that wanted a saved account but had to start on the signed-in one
+    /// because its token could not be read. Silent fallback is what makes
+    /// account switching look broken, so it is remembered and shown.
+    private var fellBack: [String: String] = [:]
+    /// Text that was typed but not sent when a tab was restarted, waiting for
+    /// the new session to be ready to take it back.
+    private var pendingDrafts: [String: String] = [:]
+    /// Tabs that were busy when the account changed: they finish what they are
+    /// doing first and move over after. Never interrupted mid-answer.
+    private var deferredSwitches: [String: (tab: TerminalTab, account: String)] = [:]
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
@@ -120,18 +134,34 @@ final class TerminalManager: NSObject, ObservableObject {
         // A profile tab runs as its own account: the CLI reads this instead of
         // the signed-in credentials, which is what lets two tabs use two
         // accounts at the same time.
-        if let profile = tab.profile ?? TokenStore.activeProfile,
-           let token = TokenStore.token(for: profile) {
+        launchedProfile[tab.id] = nil
+        fellBack[tab.id] = nil
+        // Deliberately the cached token only: a keychain panel here would
+        // freeze the app mid-layout, and a session that quietly starts on the
+        // wrong account is worse than one that starts late.
+        if !tab.pinnedToSignedIn,
+           let profile = tab.profile ?? TokenStore.activeProfile,
+           let token = TokenStore.cachedToken(for: profile) {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            launchedProfile[tab.id] = profile
+        } else if !tab.pinnedToSignedIn,
+                  let wanted = tab.profile ?? TokenStore.activeProfile {
+            fellBack[tab.id] = wanted
         }
         let envArray = env.map { "\($0.key)=\($0.value)" }
 
         switch tab.kind {
         case .resume(let sessionID):
             start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath)) --resume \(ClaudeSession.shellQuote(sessionID))", in: tab.cwd)
-        case .newSession:
-            // ⌘N — a fresh Claude session in the tab's folder
-            start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath))", in: tab.cwd)
+        case .newSession(let sessionID):
+            // ⌘N — a fresh Claude session in the tab's folder, under the id the
+            // tab was opened with, so the sidebar row and this tab are the same
+            // session from the start. Restarting a tab that already has a
+            // transcript resumes it: --session-id refuses an id that is taken.
+            let flag = Self.transcriptExists(sessionID) ? "--resume" : "--session-id"
+            start(view, envArray,
+                  "exec \(ClaudeSession.shellQuote(claudePath)) \(flag) \(ClaudeSession.shellQuote(sessionID))",
+                  in: tab.cwd)
         case .command(let args):
             // `claude auth login`, `auth logout` — the shell stays afterwards so
             // the result is still readable instead of the tab dropping dead.
@@ -153,6 +183,20 @@ final class TerminalManager: NSObject, ObservableObject {
         return view
     }
 
+    /// Whether Claude Code has already written a transcript for this session.
+    /// The project folder is derived from the cwd by a scheme we would rather
+    /// not reimplement, so this just looks for the file across all of them.
+    private static func transcriptExists(_ sessionID: String) -> Bool {
+        let fm = FileManager.default
+        let root = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return false
+        }
+        return dirs.contains {
+            fm.fileExists(atPath: $0.appendingPathComponent("\(sessionID).jsonl").path)
+        }
+    }
+
     /// A login shell gives `claude` the same PATH the user's terminal has.
     private func start(_ view: LocalProcessTerminalView, _ env: [String], _ command: String, in cwd: String) {
         view.startProcess(
@@ -163,17 +207,98 @@ final class TerminalManager: NSObject, ObservableObject {
         )
     }
 
-    /// Restart a tab whose process ended.
+    /// The account this tab runs as: the one it launched with once it is
+    /// running, the one it would launch with before that.
+    func profile(of tab: TerminalTab) -> String? {
+        if terminals[tab.id] != nil { return launchedProfile[tab.id] }
+        if tab.pinnedToSignedIn { return nil }
+        return tab.profile ?? TokenStore.activeProfile
+    }
+
+    /// Whether the tab is already running, so its account is settled rather
+    /// than a prediction.
+    func hasLaunched(_ tabID: String) -> Bool { terminals[tabID] != nil }
+
+    /// The saved account this tab was meant to run as but could not.
+    func fallbackAccount(of tabID: String) -> String? { fellBack[tabID] }
+
+    /// Restart a tab, whether its process ended or is still running.
+    ///
+    /// A live process is stopped first: dropping the reference would leave it
+    /// running on the old account, still holding that token, invisible.
     func relaunch(_ tab: TerminalTab) {
-        terminals.removeValue(forKey: tab.id)
+        if let view = terminals.removeValue(forKey: tab.id), !deadTabs.contains(tab.id) {
+            // Switching account restarts the session; what you were halfway
+            // through typing should survive that.
+            if let draft = Self.draft(in: Self.visibleText(of: view)) {
+                pendingDrafts[tab.id] = draft
+            }
+            view.terminate()
+        }
+        launchedProfile[tab.id] = nil
+        fellBack[tab.id] = nil
         deadTabs.remove(tab.id)
         generation += 1
+    }
+
+    /// Moves every open conversation onto the account that is active now.
+    ///
+    /// Switching account used to apply only to what you opened next, which
+    /// meant the window could show four tabs under one account label while
+    /// three of them ran as somebody else. A conversation survives this: it
+    /// resumes from its transcript, on the new account. Shells and one-shot
+    /// `claude auth` tabs are left alone — restarting those would throw away
+    /// what you were doing in them, and they are not conversations.
+    ///
+    /// Only the visible tab starts again immediately; the rest start as you
+    /// come back to them, which is also when they would have cost anything.
+    @discardableResult
+    func restartConversations(_ tabs: [TerminalTab]) -> Int {
+        let target = TokenStore.activeProfile ?? "the signed-in account"
+        var moved = 0
+        for tab in tabs where tab.isConversation {
+            // A session that is working, or waiting for you to answer a
+            // permission prompt, is not something to kill: it finishes, then
+            // moves. Anything idle goes now.
+            if activity(of: tab.id) == .idle || activity(of: tab.id) == .stopped {
+                relaunch(tab)
+                moved += 1
+            } else {
+                deferredSwitches[tab.id] = (tab, target)
+            }
+        }
+        return moved
+    }
+
+    /// The account a tab will move to once it is done, if it was busy when you
+    /// switched.
+    func pendingSwitch(of tabID: String) -> String? {
+        deferredSwitches[tabID]?.account
+    }
+
+    /// Moves the tabs that were busy when the account changed, now that they
+    /// are not.
+    private func applyDeferredSwitches() {
+        guard !deferredSwitches.isEmpty else { return }
+        for (id, pending) in deferredSwitches {
+            guard terminals[id] != nil else {
+                deferredSwitches[id] = nil
+                continue
+            }
+            guard activity(of: id) == .idle else { continue }
+            deferredSwitches[id] = nil
+            relaunch(pending.tab)
+        }
     }
 
     func closeTerminal(for tabID: String) {
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
             view.terminate()
         }
+        launchedProfile[tabID] = nil
+        fellBack[tabID] = nil
+        pendingDrafts[tabID] = nil
+        deferredSwitches[tabID] = nil
         deadTabs.remove(tabID)
         generation += 1
     }
@@ -199,10 +324,25 @@ final class TerminalManager: NSObject, ObservableObject {
             next[id] = Self.classify(Self.visibleText(of: view))
         }
         if next != activity { activity = next }
+        applyDeferredSwitches()
+        restoreDrafts()
         if next.values.contains(where: \.pulses) {
             pulse.toggle()
         } else if pulse {
             pulse = false
+        }
+    }
+
+    /// Types a kept draft back in, once the new session has an empty prompt to
+    /// take it — sending it earlier is how a keystroke gets swallowed by a
+    /// session that is still starting.
+    private func restoreDrafts() {
+        guard !pendingDrafts.isEmpty else { return }
+        for (id, draft) in pendingDrafts {
+            guard let view = terminals[id], !deadTabs.contains(id) else { continue }
+            guard Self.promptIsEmpty(Self.visibleText(of: view)) else { continue }
+            view.send(txt: draft)
+            pendingDrafts[id] = nil
         }
     }
 
@@ -264,20 +404,63 @@ final class TerminalManager: NSObject, ObservableObject {
         return submit
     }
 
-    /// The prompt box renders as `│ > …`; an empty one has nothing after the
-    /// caret. Anything we cannot read confidently counts as "not empty".
-    private static func promptIsEmpty(_ screen: String) -> Bool {
-        for line in screen.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+    /// The prompt renders as `❯ …`, or as `│ > …` inside a box in older
+    /// versions. Returns where it is and what is on it.
+    private static func promptLine(_ screen: String) -> (index: Int, text: String, lines: [String])? {
+        let lines = screen.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        for index in lines.indices.reversed() {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
             let unboxed = trimmed.hasPrefix("\u{2502}")     // │
                 ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
                 : trimmed
-            guard unboxed.hasPrefix(">") else { continue }
-            let rest = unboxed.dropFirst()
+            guard unboxed.hasPrefix("\u{276F}") || unboxed.hasPrefix(">") else { continue }  // ❯
+            let text = unboxed.dropFirst()
                 .trimmingCharacters(in: CharacterSet(charactersIn: " \u{2502}"))
-            return rest.isEmpty
+            return (index, text, lines)
         }
-        return false
+        return nil
+    }
+
+    /// The hint an empty prompt shows — `Try "write a test for <filepath>"` —
+    /// which is on screen but is not something anybody typed.
+    private static func isPlaceholder(_ text: String) -> Bool {
+        text.hasPrefix("Try \"") || text.hasPrefix("Try \u{201C}")
+    }
+
+    /// An empty prompt has nothing on it but the hint. Anything we cannot read
+    /// confidently counts as "not empty".
+    private static func promptIsEmpty(_ screen: String) -> Bool {
+        guard let prompt = promptLine(screen) else { return false }
+        return prompt.text.isEmpty || isPlaceholder(prompt.text)
+    }
+
+    /// What has been typed into the prompt but not sent yet.
+    ///
+    /// Long input wraps onto the lines under the caret, so those are taken too,
+    /// up to the frame the session draws under its input. Where the wrap fell
+    /// is not recoverable from the screen, so the pieces are rejoined with a
+    /// space: the words come back, and a rewrapped sentence is a far better
+    /// outcome than an empty box.
+    static func draft(in screen: String) -> String? {
+        guard let prompt = promptLine(screen),
+              !prompt.text.isEmpty, !isPlaceholder(prompt.text) else { return nil }
+
+        var parts = [prompt.text]
+        for line in prompt.lines.dropFirst(prompt.index + 1) {
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \u{2502}"))
+            guard !trimmed.isEmpty, !isFrame(trimmed) else { break }
+            parts.append(trimmed)
+        }
+        let text = parts.joined(separator: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The rules, status line and hints drawn under the input box.
+    private static func isFrame(_ line: String) -> Bool {
+        guard let first = line.first else { return true }
+        return "\u{2500}\u{256D}\u{2570}\u{23F5}\u{26A0}?".contains(first)   // ─ ╭ ╰ ⏵ ⚠ ?
     }
 
     // MARK: - Text size

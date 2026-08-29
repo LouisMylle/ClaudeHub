@@ -4,9 +4,8 @@ import Combine
 /// Who Claude Code is currently logged in as, per `claude auth status --json`.
 struct ClaudeAccount: Equatable {
     let email: String
-    let orgName: String?
+    let orgID: String?
     let plan: String?          // "pro", "max", …
-    let authMethod: String?    // "claude.ai", "console", …
 
     var shortEmail: String {
         email.split(separator: "@").first.map(String.init) ?? email
@@ -17,16 +16,49 @@ struct ClaudeAccount: Equatable {
         return plan.prefix(1).uppercased() + plan.dropFirst()
     }
 
-    var menuLabel: String {
-        [email, planLabel].compactMap { $0 }.joined(separator: " · ")
+}
+
+/// Why an account could not be added, phrased for the person adding it.
+struct AccountError: Error {
+    let message: String
+    /// True when the token was kept anyway — we could not reach the API to
+    /// judge it, which is not the same as the API refusing it.
+    var savedAnyway = false
+}
+
+/// What we know about a saved account: whose it is, and whether its token still
+/// works. A token that was fine last week is not a token that is fine now, so
+/// this is a checked fact with a timestamp, not a setting.
+struct ProfileStatus: Equatable {
+    /// The organisation the API billed a test request to — the one fact a
+    /// setup-token will disclose about whose it is.
+    var organizationID: String?
+    /// Non-nil means the API refused the token — this account cannot run.
+    var problem: String?
+    /// Non-nil means we could not reach the API; the token may still be fine.
+    var unverified: String?
+    /// The token is saved but macOS would not hand it over — a keychain panel
+    /// away from working, not a broken account.
+    var locked = false
+    var checkedAt: Date?
+    var isChecking = false
+
+    /// One line for the menu and the tooltip.
+    var summary: String {
+        if isChecking { return "Checking…" }
+        if locked, let problem { return problem }
+        if let problem { return "Token rejected — \(problem)" }
+        if let unverified { return "Not checked — \(unverified)" }
+        return "Token saved"
     }
 }
 
 /// Tracks the signed-in account and the accounts you switch between.
 ///
-/// Deliberately hands every credential operation to `claude auth` — ClaudeHub
-/// stores nothing but the e-mail addresses you have used, so switching is a
-/// normal login, never a token being copied around.
+/// Two mechanisms live here. `claude auth login` changes the one account the
+/// CLI is signed in as, machine-wide. A saved token instead rides along in a
+/// single session's environment, which is what lets two tabs run as two
+/// accounts at once — and, unlike a login, it can be checked without a browser.
 final class AccountStore: ObservableObject {
     @Published private(set) var current: ClaudeAccount?
     /// Not logged in, or `claude auth status` could not be read.
@@ -39,34 +71,226 @@ final class AccountStore: ObservableObject {
     @Published private(set) var tokenProfiles: [String] = TokenStore.profiles
     /// nil = run as whoever the CLI is signed in as.
     @Published private(set) var activeProfile: String? = TokenStore.activeProfile
+    /// Per saved account: whose token it is and whether it still authenticates.
+    @Published private(set) var profileStatus: [String: ProfileStatus] = AccountStore.loadStatuses()
 
     /// Everything ClaudeHub starts from now on runs as this account.
     func setActive(_ profile: String?) {
         TokenStore.activeProfile = profile
         activeProfile = TokenStore.activeProfile
+        if let profile, status(of: profile).checkedAt == nil { verify(profile) }
         NotificationCenter.default.post(name: .activeAccountChanged, object: nil)
     }
 
     private var inFlight = false
 
+    // MARK: - Saved accounts
+
+    /// Saves a token only once it has proved it authenticates, and reports back
+    /// whose account it turned out to be — the alternative is a silent Save
+    /// that looks identical whether the token works or not.
+    ///
+    /// `label` may be empty: the account's own e-mail names it instead.
+    func addProfile(_ label: String,
+                    token: String,
+                    completion: @escaping (Result<String, AccountError>) -> Void) {
+        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return completion(.failure(AccountError(message: "No token was entered."))) }
+
+        TokenCheck.run(token: token) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .rejected(let why):
+                completion(.failure(AccountError(message: why)))
+            case .valid(let org):
+                let name = self.name(for: label)
+                guard TokenStore.save(token: token, for: name) else {
+                    return completion(.failure(AccountError(message: "The login keychain refused the item.")))
+                }
+                self.tokenProfiles = TokenStore.profiles
+                self.setStatus(ProfileStatus(organizationID: org, checkedAt: Date()), for: name)
+                // Saving an account you cannot switch to is not a feature:
+                // sessions started from now on run as it.
+                self.setActive(name)
+                completion(.success(name))
+            case .unreachable(let why):
+                // Offline is not proof the token is bad; keep it, flag it.
+                let name = self.name(for: label)
+                guard TokenStore.save(token: token, for: name) else {
+                    return completion(.failure(AccountError(message: "The login keychain refused the item.")))
+                }
+                self.tokenProfiles = TokenStore.profiles
+                self.setStatus(ProfileStatus(unverified: why, checkedAt: Date()), for: name)
+                self.setActive(name)
+                completion(.failure(AccountError(
+                    message: "Saved as \(name) and switched to, but it could not be checked: \(why)",
+                    savedAnyway: true)))
+            }
+        }
+    }
+
+    /// The escape hatch: keep a token the check refused. The check is a
+    /// courtesy, not a gate — if Anthropic ever answers differently for a token
+    /// that works fine in a session, the app must not be the thing standing in
+    /// the way.
     @discardableResult
-    func addProfile(_ label: String, token: String) -> Bool {
-        guard TokenStore.save(token: token, for: label) else { return false }
+    func saveUnchecked(_ label: String, token: String) -> Bool {
+        let name = name(for: label)
+        guard TokenStore.save(token: token, for: name) else { return false }
         tokenProfiles = TokenStore.profiles
-        remember(label)
+        setStatus(ProfileStatus(unverified: "Saved without a successful check.",
+                                checkedAt: Date()), for: name)
+        setActive(name)
         return true
+    }
+
+    private func name(for label: String) -> String {
+        let clean = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? "Account \(tokenProfiles.count + 1)" : clean
     }
 
     func removeProfile(_ label: String) {
         TokenStore.delete(label)
         tokenProfiles = TokenStore.profiles
         activeProfile = TokenStore.activeProfile
+        profileStatus[label] = nil
+        persistStatuses()
+    }
+
+    /// Loads the saved tokens once, off the main thread, and checks each one.
+    ///
+    /// The keychain panel that an updated build raises blocks the thread that
+    /// asked, so this must never be the main one — and doing it up front means
+    /// starting a session later never waits on a panel.
+    func primeTokens() {
+        let profiles = tokenProfiles
+        guard !profiles.isEmpty else { return }
+        for profile in profiles {
+            var status = self.status(of: profile)
+            status.isChecking = true
+            setStatus(status, for: profile, persist: false)
+        }
+        TokenStore.prime(profiles) { [weak self] in
+            self?.verifyAll()
+        }
+    }
+
+    /// Re-asks the API whether a saved token still authenticates.
+    func verify(_ profile: String) {
+        guard let token = TokenStore.cachedToken(for: profile) else {
+            // Not in hand: either macOS blocked the read, or the item is gone.
+            let problem = TokenStore.blockedReason(for: profile)
+                ?? "The token is no longer in your keychain — paste it again."
+            var status = self.status(of: profile)
+            status.isChecking = false
+            status.problem = problem
+            status.locked = true
+            setStatus(status, for: profile)
+            // No automatic retry: the panel was just answered, and asking again
+            // on its own would only put a second one on screen. "Unlock" in the
+            // account menu is the deliberate way back.
+            return
+        }
+        var status = profileStatus[profile] ?? ProfileStatus()
+        status.isChecking = true
+        status.problem = nil
+        status.locked = false
+        setStatus(status, for: profile, persist: false)
+
+        TokenCheck.run(token: token) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .valid(let org):
+                self.setStatus(ProfileStatus(organizationID: org ?? status.organizationID,
+                                             checkedAt: Date()), for: profile)
+            case .rejected(let why):
+                self.setStatus(ProfileStatus(organizationID: status.organizationID,
+                                             problem: why,
+                                             checkedAt: Date()), for: profile)
+            case .unreachable(let why):
+                self.setStatus(ProfileStatus(organizationID: status.organizationID,
+                                             unverified: why,
+                                             checkedAt: Date()), for: profile)
+            }
+        }
+    }
+
+    func verifyAll() {
+        for profile in tokenProfiles { verify(profile) }
+    }
+
+    /// Asks macOS for the token again, which is what raises the keychain panel
+    /// where Always Allow lives.
+    func unlock(_ profile: String) {
+        TokenStore.prime([profile]) { [weak self] in
+            self?.verify(profile)
+        }
+    }
+
+    /// Accounts that are saved but unreadable right now.
+    var lockedProfiles: [String] {
+        tokenProfiles.filter { status(of: $0).locked }
+    }
+
+    func status(of profile: String) -> ProfileStatus {
+        profileStatus[profile] ?? ProfileStatus()
+    }
+
+    /// Whether a saved token really is a different account from the one the
+    /// CLI is signed in as — checked, not assumed from the label you typed.
+    ///
+    /// Returns nil when the API did not name an organisation, because "we do
+    /// not know" must not be dressed up as either answer.
+    func isDistinctAccount(_ profile: String) -> Bool? {
+        guard let token = status(of: profile).organizationID,
+              let signedIn = current?.orgID else { return nil }
+        return token.caseInsensitiveCompare(signedIn) != .orderedSame
+    }
+
+    /// One sentence on whose account a saved token turned out to be.
+    func identity(of profile: String) -> String {
+        switch isDistinctAccount(profile) {
+        case true:
+            return """
+                Checked: a different account from \(current?.email ?? "the signed-in one") \
+                — the API billed the test request to another organisation.
+                """
+        case false:
+            return """
+                Careful: this token bills to the same organisation as \
+                \(current?.email ?? "the signed-in account"), so it is that account, \
+                not a second one.
+                """
+        default:
+            return "The API did not say whose account this token is."
+        }
+    }
+
+    /// The account a tab actually runs as, spelled out for menus and tooltips.
+    func describe(profile: String?) -> String {
+        guard let profile else {
+            return current.map { "\($0.email) (signed in)" } ?? "the signed-in account"
+        }
+        return profile
+    }
+
+    private func setStatus(_ status: ProfileStatus, for profile: String, persist: Bool = true) {
+        profileStatus[profile] = status
+        if persist { persistStatuses() }
     }
 
     /// What the sidebar chip shows: the account sessions actually run as.
     var effectiveLabel: String {
         activeProfile ?? current?.shortEmail ?? "Sign in"
     }
+
+    /// The active account cannot authenticate — sessions started now will fail.
+    var activeProfileIsBroken: Bool {
+        guard let activeProfile else { return false }
+        return status(of: activeProfile).problem != nil
+    }
+
+    // MARK: - The signed-in account
 
     func refresh() {
         guard !inFlight else { return }
@@ -115,6 +339,29 @@ final class AccountStore: ObservableObject {
         UserDefaults.standard.set(knownEmails, forKey: "knownAccountEmails")
     }
 
+    // MARK: - Remembering what each token turned out to be
+
+    private static let statusKey = "profileStatuses"
+
+    private func persistStatuses() {
+        let stored = profileStatus.mapValues { status -> [String: String] in
+            var fields: [String: String] = [:]
+            if let org = status.organizationID { fields["org"] = org }
+            // A locked token is this launch's problem, not next launch's: the
+            // panel may well be answered with Always Allow before then.
+            if let problem = status.problem, !status.locked { fields["problem"] = problem }
+            return fields
+        }
+        UserDefaults.standard.set(stored, forKey: Self.statusKey)
+    }
+
+    private static func loadStatuses() -> [String: ProfileStatus] {
+        let stored = UserDefaults.standard.dictionary(forKey: statusKey) as? [String: [String: String]]
+        return (stored ?? [:]).mapValues {
+            ProfileStatus(organizationID: $0["org"], problem: $0["problem"])
+        }
+    }
+
     // MARK: - Reading `claude auth status`
 
     private enum StatusResult {
@@ -148,9 +395,8 @@ final class AccountStore: ObservableObject {
         }
         return .success(ClaudeAccount(
             email: email,
-            orgName: json["orgName"] as? String,
-            plan: json["subscriptionType"] as? String,
-            authMethod: json["authMethod"] as? String
+            orgID: json["orgId"] as? String,
+            plan: json["subscriptionType"] as? String
         ))
     }
 }

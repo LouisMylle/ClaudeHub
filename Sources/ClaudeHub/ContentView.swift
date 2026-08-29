@@ -41,6 +41,14 @@ struct ContentView: View {
         }
     }
 
+    /// A session's dot comes from the tab running it — which may be the tab it
+    /// was started in (⌘N) or one opened under another account, so the tab id
+    /// is not always the session id.
+    private func activity(of session: ClaudeSession) -> TerminalActivity {
+        guard let tab = tabs.tab(forSessionID: session.id) else { return .stopped }
+        return terminalManager.activity(of: tab.id)
+    }
+
     private func session(withID id: String) -> ClaudeSession? {
         for project in store.projects {
             if let session = project.sessions.first(where: { $0.id == id }) {
@@ -59,6 +67,10 @@ struct ContentView: View {
         .onAppear {
             store.refresh()
             accounts.refresh()
+            // Loads the saved tokens (one keychain panel at most, off the main
+            // thread) and checks each one: a token revoked since it was saved
+            // should be visible on the chip, not on your first message.
+            accounts.primeTokens()
             updates.check()
             // The probe needs a folder Claude Code already trusts, so it waits
             // for the first scan — off the sidebar's own update cycle.
@@ -70,13 +82,17 @@ struct ContentView: View {
             // Coming back from the login page in the browser lands here.
             accounts.refresh()
         }
+        .onChange(of: store.projects) { _, projects in
+            // A ⌘N tab is titled after its folder until the transcript exists.
+            tabs.adoptSessionTitles(from: projects)
+        }
         .onChange(of: selectedSessionID) { _, id in
             guard let id, let session = session(withID: id) else { return }
             tabs.openSession(session)
         }
         .onChange(of: tabs.activeTabID) { _, _ in
             // Keep the sidebar in sync with the active tab (nil for fresh-session tabs)
-            selectedSessionID = tabs.activeTab?.resumeSessionID
+            selectedSessionID = tabs.activeTab?.sessionID
         }
         .onReceive(NotificationCenter.default.publisher(for: .newClaudeSessionInFolder)) { _ in
             newSessionInChosenFolder()
@@ -85,6 +101,10 @@ struct ContentView: View {
             requestDeletionOfSelection()
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeAccountChanged)) { _ in
+            // Switching account switches the whole window, not just what you
+            // open next: every conversation restarts on the new account and
+            // resumes where it was.
+            terminalManager.restartConversations(tabs.tabs)
             usage.accountChanged()
         }
         .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
@@ -110,7 +130,7 @@ struct ContentView: View {
                 Section {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
-                                   activity: terminalManager.activity(of: session.id),
+                                   activity: activity(of: session),
                                    isHidden: store.hiddenSessionIDs.contains(session.id))
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
@@ -282,7 +302,14 @@ struct ContentView: View {
         if !accounts.tokenProfiles.isEmpty {
             Menu("Resume as") {
                 ForEach(accounts.tokenProfiles, id: \.self) { profile in
-                    Button(profile) { tabs.openSession(session, profile: profile) }
+                    Button(accounts.describe(profile: profile)) {
+                        tabs.openSession(session, profile: profile)
+                    }
+                }
+                // Without this there is no way back to the CLI's own login
+                // once a saved account is the active one.
+                Button(accounts.current.map { "\($0.email) (signed in)" } ?? "Signed-in account") {
+                    tabs.openSession(session, signedIn: true)
                 }
             }
             Divider()
@@ -437,6 +464,10 @@ private struct TabBarView: View {
                             isActive: tab.id == tabs.activeTabID,
                             activity: terminalManager.activity(of: tab.id),
                             accountLabel: accounts.effectiveLabel,
+                            account: terminalManager.profile(of: tab),
+                            accountIsLive: terminalManager.hasLaunched(tab.id),
+                            fellBackFrom: terminalManager.fallbackAccount(of: tab.id),
+                            pendingAccount: terminalManager.pendingSwitch(of: tab.id),
                             activate: { tabs.activeTabID = tab.id },
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
@@ -483,6 +514,15 @@ private struct TabChip: View {
     let isActive: Bool
     let activity: TerminalActivity
     let accountLabel: String
+    /// The saved account this tab runs as, nil for the signed-in one.
+    let account: String?
+    /// True once the tab is running, so the account is a fact, not a plan.
+    let accountIsLive: Bool
+    /// Set when the tab wanted a saved account and had to start without it.
+    let fellBackFrom: String?
+    /// Set when the tab was busy at the moment you switched account: it moves
+    /// as soon as it is finished.
+    let pendingAccount: String?
     let activate: () -> Void
     let restart: () -> Void
     let close: () -> Void
@@ -509,6 +549,37 @@ private struct TabChip: View {
                 .lineLimit(1)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)
+            if let pendingAccount {
+                Text("→ \(TabsModel.shortLabel(pendingAccount))")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.orange.opacity(0.20), in: Capsule())
+                    .help("""
+                        Busy right now — this conversation moves to \
+                        \(pendingAccount) and resumes as soon as it is done.
+                        """)
+            } else if let fellBackFrom {
+                Text("signed in")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.orange.opacity(0.25), in: Capsule())
+                    .help("""
+                        This tab runs on the signed-in account: the saved token \
+                        for \(fellBackFrom) could not be read. Fix it in the \
+                        account menu, then restart the tab.
+                        """)
+            } else if let account {
+                Text(TabsModel.shortLabel(account))
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor.opacity(accountIsLive ? 0.22 : 0.10), in: Capsule())
+                    .help(accountIsLive
+                          ? "Running as \(account)"
+                          : "Will start as \(account)")
+            }
             Button(action: close) {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -530,10 +601,12 @@ private struct TabChip: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: activate)
         .contextMenu {
-            // A running process keeps the account it launched with, but a
-            // resumed tab can simply be run again — same conversation, now on
-            // whichever account is active.
-            Button(tab.resumeSessionID == nil
+            // Switching account already restarts every conversation; this is
+            // for the single tab you want moved or simply started again.
+            Text(fellBackFrom.map { "Wanted \($0) — running on the signed-in account" }
+                 ?? account.map { "Running as \($0)" }
+                 ?? "Running as the signed-in account")
+            Button(tab.sessionID == nil
                    ? "Restart Tab"
                    : "Restart as \(accountLabel)") { restart() }
             Button("Close Tab") { close() }
@@ -587,7 +660,7 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.title)
                     .lineLimit(1)
-                Text(session.lastModified, format: .relative(presentation: .named))
+                Text(session.lastActivity, format: .relative(presentation: .named))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

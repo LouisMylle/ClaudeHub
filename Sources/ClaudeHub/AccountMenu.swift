@@ -2,9 +2,10 @@ import SwiftUI
 
 /// The things the Claude menu and the sidebar account chip can do.
 ///
-/// Account changes go through the `claude auth` CLI in a visible terminal tab,
+/// Browser logins go through the `claude auth` CLI in a visible terminal tab,
 /// so the real login flow (browser, SSO, 2FA) happens exactly as it normally
-/// would and ClaudeHub never holds a credential.
+/// would. Saved accounts are `claude setup-token` tokens you paste, checked
+/// against the API before they are kept and every time you switch to one.
 enum ClaudeCommands {
 
     // MARK: Slash commands in the current session
@@ -66,13 +67,13 @@ enum ClaudeCommands {
         alert.messageText = "Add an account you can switch to instantly"
         alert.informativeText = """
             Run `claude setup-token` while signed in as that account, then paste \
-            the token it prints. ClaudeHub keeps it in your login keychain and \
-            hands it to the sessions you start as that account — no browser, and \
-            other tabs keep running on their own account.
+            the token it prints. ClaudeHub checks it with Anthropic, keeps it in \
+            your login keychain, and runs the sessions you start as that account \
+            — no browser, and other tabs keep running on their own account.
             """
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 330, height: 56))
         let label = NSTextField(frame: NSRect(x: 0, y: 30, width: 330, height: 22))
-        label.placeholderString = "Label, e.g. work@example.com"
+        label.placeholderString = "Name (optional — the account's e-mail by default)"
         let token = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 330, height: 22))
         token.placeholderString = "Token from claude setup-token"
         container.addSubview(label)
@@ -81,21 +82,81 @@ enum ClaudeCommands {
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Run setup-token…")
         alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = label
+        alert.window.initialFirstResponder = token
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             let name = label.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let secret = token.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, !secret.isEmpty else { return }
-            if !accounts.addProfile(name, token: secret) {
-                let failure = NSAlert()
-                failure.messageText = "Could not save the token"
-                failure.informativeText = "The login keychain refused the item."
-                failure.runModal()
+            guard !secret.isEmpty else {
+                return report(AccountError(message: "No token was entered."),
+                              name: name, token: nil, accounts: accounts, tabs: tabs)
+            }
+            accounts.addProfile(name, token: secret) { result in
+                switch result {
+                case .success(let saved):
+                    let done = NSAlert()
+                    done.messageText = "Now running as \(saved)"
+                    // A setup-token never names its account, so what the check
+                    // did establish is said plainly instead of implying more.
+                    let checked = accounts.identity(of: saved)
+                    done.informativeText = """
+                        \(checked) Every open conversation moves to this account and \
+                        resumes where it was — one that is mid-answer moves when it \
+                        finishes, never interrupted. Shell tabs are left alone.
+                        """
+                    done.runModal()
+                case .failure(let error):
+                    report(error, name: name, token: secret, accounts: accounts, tabs: tabs)
+                }
             }
         case .alertSecondButtonReturn:
             runSetupToken(tabs: tabs)
+        default:
+            break
+        }
+    }
+
+    /// A token that does not authenticate is the common case worth explaining:
+    /// `setup-token` output is easy to truncate, and tokens expire.
+    private static func report(_ error: AccountError,
+                               name: String,
+                               token: String?,
+                               accounts: AccountStore,
+                               tabs: TabsModel) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if error.savedAnyway {
+            alert.messageText = "Saved, but not verified"
+            alert.informativeText = """
+                \(error.message)
+
+                Sessions you start will use it; if it turns out to be expired \
+                they will say so on their first message.
+                """
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        alert.messageText = "That token was not accepted"
+        alert.informativeText = """
+            \(error.message)
+
+            Tokens come from `claude setup-token`, run while signed in as the \
+            other account — copy the whole `sk-ant-oat…` line it prints.
+            """
+        alert.addButton(withTitle: "Run setup-token…")
+        alert.addButton(withTitle: "Try Again…")
+        if token != nil { alert.addButton(withTitle: "Save Anyway") }
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            runSetupToken(tabs: tabs)
+        case .alertSecondButtonReturn:
+            addProfile(accounts: accounts, tabs: tabs)
+        case .alertThirdButtonReturn:
+            guard let token else { return }
+            accounts.saveUnchecked(name, token: token)
         default:
             break
         }
@@ -148,10 +209,28 @@ struct AccountItems: View {
     }
 
     var body: some View {
+        if let active = accounts.activeProfile {
+            Section("This is what was checked") {
+                Text(accounts.identity(of: active))
+            }
+        }
+
         Section("Sessions run as") {
             item(label: signedInLabel, profile: nil)
             ForEach(accounts.tokenProfiles, id: \.self) { profile in
-                item(label: profile, profile: profile)
+                item(label: menuLabel(for: profile), profile: profile)
+            }
+        }
+
+        if let locked = accounts.lockedProfiles.first {
+            Divider()
+            Text("\(locked)'s token is locked in your keychain")
+            Button("Unlock \(locked)…") { accounts.unlock(locked) }
+        } else if let broken = brokenProfile {
+            Divider()
+            Text("\(broken) cannot sign in — its token was rejected")
+            Button("Replace \(broken)'s Token…") {
+                ClaudeCommands.addProfile(accounts: accounts, tabs: tabs)
             }
         }
 
@@ -173,7 +252,10 @@ struct AccountItems: View {
 
             Divider()
 
-            Button("Re-check Account") { accounts.refresh() }
+            Button("Re-check Accounts") {
+                accounts.refresh()
+                accounts.primeTokens()
+            }
             Button("Log Out…") { ClaudeCommands.logOut(accounts: accounts, tabs: tabs) }
 
             if !accounts.tokenProfiles.isEmpty || !withoutToken.isEmpty {
@@ -195,6 +277,24 @@ struct AccountItems: View {
     private var signedInLabel: String {
         guard let current = accounts.current else { return "Signed-in account" }
         return "\(current.email) (signed in)"
+    }
+
+    /// The name you gave it, plus what the token turned out to be — so a saved
+    /// account is never just a label you have to take on faith.
+    private func menuLabel(for profile: String) -> String {
+        let status = accounts.status(of: profile)
+        if status.locked { return "\(profile) — locked in the keychain" }
+        if status.problem != nil { return "\(profile) — token rejected" }
+        if status.isChecking { return "\(profile) — checking…" }
+        switch accounts.isDistinctAccount(profile) {
+        case true: return "\(profile) — another account ✓"
+        case false: return "\(profile) — same account as signed in"
+        default: return profile
+        }
+    }
+
+    private var brokenProfile: String? {
+        accounts.tokenProfiles.first { accounts.status(of: $0).problem != nil }
     }
 
     @ViewBuilder
@@ -219,12 +319,24 @@ struct AccountChip: View {
     private var helpText: String {
         if let active = accounts.activeProfile {
             return """
-                Sessions run as \(active).
-                Tabs already running keep the account they started with.
+                Sessions run as \(accounts.describe(profile: active)).
+                \(accounts.identity(of: active))
+                Picking an account moves every open conversation to it; one
+                that is busy moves as soon as it is done.
                 """
         }
         return accounts.current.map { "Sessions run as \($0.email), the signed-in account" }
             ?? "Not signed in — click to log in"
+    }
+
+    /// Broken beats signed-out: a rejected token is the one state where every
+    /// session you start from here will fail on its first message.
+    private var icon: String {
+        if accounts.activeProfileIsBroken { return "exclamationmark.triangle.fill" }
+        if accounts.activeProfile != nil { return "person.crop.circle.fill" }
+        return accounts.current == nil
+            ? "person.crop.circle.badge.exclamationmark"
+            : "person.crop.circle"
     }
 
     var body: some View {
@@ -232,9 +344,8 @@ struct AccountChip: View {
             AccountItems(accounts: accounts, tabs: tabs)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: accounts.current == nil
-                      ? "person.crop.circle.badge.exclamationmark"
-                      : "person.crop.circle")
+                Image(systemName: icon)
+                    .foregroundStyle(accounts.activeProfileIsBroken ? Color.orange : Color.secondary)
                 Text(accounts.effectiveLabel)
                     .lineLimit(1)
                 if let plan = accounts.activeProfile == nil ? accounts.current?.planLabel : nil {
