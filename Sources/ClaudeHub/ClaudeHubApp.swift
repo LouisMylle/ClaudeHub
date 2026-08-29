@@ -36,6 +36,7 @@ struct ClaudeHubApp: App {
     @StateObject private var tabs = TabsModel()
     @StateObject private var accounts = AccountStore()
     @StateObject private var usage = UsageStore()
+    @StateObject private var git = GitStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -44,6 +45,7 @@ struct ClaudeHubApp: App {
                 .environmentObject(tabs)
                 .environmentObject(accounts)
                 .environmentObject(usage)
+                .environmentObject(git)
         }
         .defaultSize(width: 1200, height: 760)
         .commands {

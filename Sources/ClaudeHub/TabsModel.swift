@@ -7,6 +7,7 @@ enum TerminalTabKind: Hashable {
     case newSession(String)  // a brand-new `claude --session-id <session-id>` in the tab's folder
     case shell               // plain login shell
     case command([String])   // one-shot `claude <args…>`, e.g. auth login
+    case script(String)      // one-shot shell command, e.g. `git diff`
 }
 
 struct TerminalTab: Identifiable, Hashable {
@@ -29,7 +30,7 @@ struct TerminalTab: Identifiable, Hashable {
     var sessionID: String? {
         switch kind {
         case .resume(let id), .newSession(let id): return id
-        case .shell, .command: return nil
+        case .shell, .command, .script: return nil
         }
     }
 
@@ -43,7 +44,7 @@ struct TerminalTab: Identifiable, Hashable {
     var isConversation: Bool {
         switch kind {
         case .resume, .newSession: return true
-        case .shell, .command: return false
+        case .shell, .command, .script: return false
         }
     }
 }
@@ -125,6 +126,15 @@ final class TabsModel: ObservableObject {
             cwd: folder,
             kind: .shell
         ))
+    }
+
+    /// Runs a shell command in its own tab and leaves the shell behind, so the
+    /// output stays readable — `git diff` for a repository, and nothing else so
+    /// far. Reusing the tab per folder keeps them from piling up.
+    func openScript(_ command: String, title: String, cwd: String) {
+        let id = "script-\(cwd)"
+        if tabs.contains(where: { $0.id == id }) { close(id) }
+        append(TerminalTab(id: id, title: title, cwd: cwd, kind: .script(command)))
     }
 
     /// Runs a `claude` subcommand in its own tab — `auth login`, `auth logout`.

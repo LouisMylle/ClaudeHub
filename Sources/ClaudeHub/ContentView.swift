@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var tabs: TabsModel
     @EnvironmentObject var accounts: AccountStore
     @EnvironmentObject var usage: UsageStore
+    @EnvironmentObject var git: GitStore
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var updates = UpdateChecker.shared
     @Environment(\.colorScheme) private var colorScheme
@@ -83,6 +84,7 @@ struct ContentView: View {
             // Every saved account's limits, not just the active one: the menu
             // is where you decide which account to go to next.
             accounts.startLimitPolling()
+            git.startPolling()
             syncVisibleTabs()
             updates.check()
             // The probe needs a folder Claude Code already trusts, so it waits
@@ -94,6 +96,7 @@ struct ContentView: View {
             store.refresh()
             // Coming back to the window is when what is on screen counts as seen.
             syncVisibleTabs()
+            git.scan()
             // Coming back from the login page in the browser lands here.
             accounts.refresh()
             // The limits are not polled behind a window nobody is watching, so
@@ -103,6 +106,7 @@ struct ContentView: View {
         .onChange(of: store.projects) { _, projects in
             // A ⌘N tab is titled after its folder until the transcript exists.
             tabs.adoptSessionTitles(from: projects)
+            git.track(projects: projects.map(\.path))
         }
         .onChange(of: selectedSessionID) { _, id in
             guard let id, let session = session(withID: id) else { return }
@@ -173,6 +177,7 @@ struct ContentView: View {
                 } header: {
                     ProjectHeader(
                         project: project,
+                        repo: git.status(forProjectAt: project.path),
                         newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
                         menu: { projectMenu(project) }
                     )
@@ -180,6 +185,27 @@ struct ContentView: View {
                 .textCase(nil)
             }
 
+            if !git.dirtyRepos.isEmpty {
+                Section("Changes") {
+                    ForEach(git.dirtyRepos) { repo in
+                        RepoRow(
+                            repo: repo,
+                            openInEditor: { openInVSCode(repo.root) },
+                            showDiff: {
+                                tabs.openScript(
+                                    "git -c color.ui=always status --short; echo; git -c color.ui=always diff HEAD",
+                                    title: "Diff · \(repo.name)",
+                                    cwd: repo.root
+                                )
+                            },
+                            reveal: {
+                                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: repo.root)
+                            },
+                            canOpenInEditor: Self.vsCodeURL != nil
+                        )
+                    }
+                }
+            }
         }
         .listStyle(.sidebar)
         .onDeleteCommand { requestDeletionOfSelection() }
@@ -977,6 +1003,100 @@ private struct SignInLinkBar: View {
     }
 }
 
+/// One repository in the Changes section: what is in it, and the ways out of
+/// ClaudeHub to look at it properly.
+private struct RepoRow: View {
+    let repo: RepoStatus
+    let openInEditor: () -> Void
+    let showDiff: () -> Void
+    let reveal: () -> Void
+    let canOpenInEditor: Bool
+
+    @State private var expanded = false
+
+    private static let shown = 6
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(repo.files.prefix(Self.shown)) { file in
+                    HStack(spacing: 6) {
+                        Text(file.mark)
+                            .font(.system(size: 10, weight: .semibold).monospaced())
+                            .foregroundStyle(Self.color(for: file.mark))
+                            .frame(width: 9, alignment: .leading)
+                        Text(file.path)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(file.path)
+                    }
+                }
+                if repo.files.count > Self.shown {
+                    Text("+ \(repo.files.count - Self.shown) more")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                HStack(spacing: 6) {
+                    if canOpenInEditor {
+                        Button("Open in VS Code", action: openInEditor)
+                    }
+                    Button("Diff in a Tab", action: showDiff)
+                    Button("Finder", action: reveal)
+                }
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+                .padding(.top, 3)
+            }
+            .padding(.top, 3)
+            .padding(.bottom, 2)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(repo.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Text("\(repo.pending)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.16), in: Capsule())
+                }
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 9, weight: .medium))
+                    Text(repo.branch)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("·")
+                    // An unpushed branch is the state you want to notice before
+                    // you close the laptop, so it does not read as an aside.
+                    Text(repo.syncLabel)
+                        .foregroundStyle(repo.isUnpushed ? Color.orange.opacity(0.9) : Color.secondary)
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            }
+            .clickable()
+            .help(repo.root)
+        }
+    }
+
+    private static func color(for mark: String) -> Color {
+        switch mark {
+        case "A": return .green
+        case "D": return .red
+        case "?": return .secondary
+        case "U": return .orange
+        default: return .orange
+        }
+    }
+}
+
 private struct SessionRow: View {
     let session: ClaudeSession
     let activity: TerminalActivity
@@ -1008,6 +1128,8 @@ private struct SessionRow: View {
 
 private struct ProjectHeader<MenuContent: View>: View {
     let project: ClaudeProject
+    /// The repository this project sits in, when it sits in one.
+    let repo: RepoStatus?
     let newSession: () -> Void
     @ViewBuilder let menu: () -> MenuContent
     @State private var isHovering = false
@@ -1027,7 +1149,30 @@ private struct ProjectHeader<MenuContent: View>: View {
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
                 .background(Color.primary.opacity(0.08), in: Capsule())
-            Spacer()
+            Spacer(minLength: 6)
+            if let repo {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 9, weight: .medium))
+                    Text(repo.branch)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if repo.pending > 0 {
+                        Text("\(repo.pending)")
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Color.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.16), in: Capsule())
+                    }
+                }
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: 150, alignment: .trailing)
+                .help(repo.pending > 0
+                      ? "\(repo.pending) uncommitted in \(repo.name) · \(repo.syncLabel)"
+                      : "\(repo.name) is clean · \(repo.syncLabel)")
+            }
             Button(action: newSession) {
                 Image(systemName: "plus.circle")
                     .font(.system(size: 12))

@@ -196,6 +196,10 @@ final class TerminalManager: NSObject, ObservableObject {
             // the result is still readable instead of the tab dropping dead.
             let command = ([claudePath] + args).map(ClaudeSession.shellQuote).joined(separator: " ")
             start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
+        case .script(let command):
+            // The shell stays afterwards, so the output can be scrolled and
+            // the command run again.
+            start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
         case .shell:
             // Plain interactive shell in the tab's folder (⌘T)
             view.startProcess(
