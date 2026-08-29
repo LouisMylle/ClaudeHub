@@ -634,6 +634,8 @@ private struct ProjectHeader<MenuContent: View>: View {
             }
             .buttonStyle(.borderless)
             .opacity(isHovering ? 1 : 0)
+            // Keeps the button clear of the sidebar scroll bar.
+            .padding(.trailing, 8)
             .help("New Claude session in \(project.name)")
         }
         .padding(.top, 12)

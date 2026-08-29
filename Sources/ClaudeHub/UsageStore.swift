@@ -1,11 +1,4 @@
 import AppKit
-
-func dbg(_ m: String) {
-    let line = "\(Date()) \(m)\n"
-    let path = "/tmp/claudehub-usage.log"
-    if let h = FileHandle(forWritingAtPath: path) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
-    else { try? line.write(toFile: path, atomically: true, encoding: .utf8) }
-}
 import Combine
 import SwiftTerm
 
@@ -88,7 +81,6 @@ final class UsageStore: ObservableObject {
         }
         retries = 0
         isProbing = true
-        dbg("refresh cwd=\(cwd) probe=\(probe != nil)")
 
         if probe == nil {
             startProbe(in: cwd)
@@ -121,7 +113,6 @@ final class UsageStore: ObservableObject {
         }
 
         let claude = TerminalManager.shared.claudePath
-        dbg("startProbe claude=\(claude)")
         view.startProcess(
             executable: "/bin/zsh",
             args: ["-l", "-c", "cd \(ClaudeSession.shellQuote(cwd)) && exec \(ClaudeSession.shellQuote(claude))"],
@@ -144,9 +135,7 @@ final class UsageStore: ObservableObject {
 
     private func readPanel(until deadline: Date) {
         guard let view = probe else { return fail("The usage probe stopped.") }
-        let screenNow = Self.screenText(of: view)
-        let parsed = Self.parse(screenNow)
-        dbg("readPanel len=\(screenNow.count) session=\(parsed.session != nil) week=\(parsed.week != nil)")
+        let parsed = Self.parse(Self.screenText(of: view))
         if parsed.session != nil || parsed.week != nil {
             session = parsed.session
             week = parsed.week
@@ -166,7 +155,6 @@ final class UsageStore: ObservableObject {
     }
 
     private func fail(_ message: String) {
-        dbg("FAIL \(message)")
         errorMessage = message
         isProbing = false
     }
