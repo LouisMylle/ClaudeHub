@@ -6,6 +6,10 @@ import SwiftTerm
 struct TerminalHostView: NSViewRepresentable {
     let tab: TerminalTab
     let generation: Int   // dependency: re-runs updateNSView when a process ends/restarts
+    /// Only the focused pane takes the keyboard: with two terminals on screen,
+    /// every layout pass would otherwise pull the caret back to whichever drew
+    /// last.
+    var isFocused = true
 
     private static let leftInset: CGFloat = 12
 
@@ -33,6 +37,7 @@ struct TerminalHostView: NSViewRepresentable {
         terminal.autoresizingMask = [.width, .height]
         container.addSubview(terminal)
 
+        guard isFocused else { return }
         DispatchQueue.main.async {
             terminal.window?.makeFirstResponder(terminal)
         }

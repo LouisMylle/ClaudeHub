@@ -42,6 +42,13 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Tabs that could not move when the account changed: they move as soon as
     /// the reason is gone. Nothing is interrupted, and nothing is lost.
     private var deferredSwitches: [String: (tab: TerminalTab, account: String, hold: SwitchHold)] = [:]
+    /// Sessions that answered while you were elsewhere. Cleared by looking at
+    /// them, which is the only thing that should clear it.
+    @Published private(set) var unread: Set<String> = []
+    private var finishedAt: [String: Date] = [:]
+    /// The tabs on screen right now, so an answer you watched arrive is not
+    /// then reported as something you missed.
+    var visibleTabs: Set<String> = []
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
@@ -78,6 +85,18 @@ final class TerminalManager: NSObject, ObservableObject {
             if event.modifierFlags.contains(.command),
                event.charactersIgnoringModifiers == "=" {
                 self?.changeFontSize(by: 1)
+                return nil
+            }
+            // ⌘⌫ is Delete Session in the menu, which means the menu was
+            // taking it from under the cursor while you were typing: one
+            // keystroke away from deleting the conversation instead of the
+            // line you meant. In a terminal it is the line — Ctrl-U, what the
+            // prompt already understands as "clear what I typed" — and the
+            // menu only gets it when the sidebar has the focus.
+            if event.keyCode == 51,                     // Delete / Backspace
+               event.modifierFlags.contains(.command),
+               let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
+                terminal.send(txt: "\u{15}")
                 return nil
             }
             return event
@@ -132,7 +151,7 @@ final class TerminalManager: NSObject, ObservableObject {
     func terminal(for tab: TerminalTab) -> LocalProcessTerminalView {
         if let existing = terminals[tab.id] { return existing }
 
-        let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let view = DroppableTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view.processDelegate = self
         view.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         applyTheme(to: view)
@@ -290,7 +309,7 @@ final class TerminalManager: NSObject, ObservableObject {
             return .attachment
         }
         switch activity(of: tab.id) {
-        case .idle, .stopped, .dead: return nil
+        case .idle, .finished, .stopped, .dead: return nil
         case .busy, .needsInput: return .busy
         }
     }
@@ -336,6 +355,8 @@ final class TerminalManager: NSObject, ObservableObject {
         launchedProfile[tabID] = nil
         fellBack[tabID] = nil
         pendingDrafts[tabID] = nil
+        finishedAt[tabID] = nil
+        markRead(tabID)
         deferredSwitches[tabID] = nil
         deadTabs.remove(tabID)
         generation += 1
@@ -346,7 +367,34 @@ final class TerminalManager: NSObject, ObservableObject {
     func activity(of tabID: String) -> TerminalActivity {
         if deadTabs.contains(tabID) { return .dead }
         guard terminals[tabID] != nil else { return .stopped }
-        return activity[tabID] ?? .idle
+        let state = activity[tabID] ?? .idle
+        // Unread only colours a session that is otherwise sitting quiet: a
+        // question or a new answer coming in outranks it.
+        if state == .idle, unread.contains(tabID) { return .finished }
+        return state
+    }
+
+    /// When a session last stopped working, for "finished 3 min ago".
+    func finishedAt(_ tabID: String) -> Date? { finishedAt[tabID] }
+
+    /// Looking at a session is what marks it read.
+    func markRead(_ tabID: String) {
+        guard unread.contains(tabID) else { return }
+        unread.remove(tabID)
+        updateDockBadge()
+    }
+
+    func markRead(_ tabIDs: some Sequence<String>) {
+        let seen = unread.intersection(tabIDs)
+        guard !seen.isEmpty else { return }
+        unread.subtract(seen)
+        updateDockBadge()
+    }
+
+    /// The count on the app icon: the whole point is to be readable with
+    /// ClaudeHub in the background, which is exactly when it matters.
+    private func updateDockBadge() {
+        NSApp.dockTile.badgeLabel = unread.isEmpty ? nil : String(unread.count)
     }
 
     /// Claude Code has no machine-readable "am I busy" channel, so this reads
@@ -358,10 +406,22 @@ final class TerminalManager: NSObject, ObservableObject {
             return
         }
         var next: [String: TerminalActivity] = [:]
+        var finished: [String] = []
         for (id, view) in terminals where !deadTabs.contains(id) {
-            next[id] = Self.classify(Self.visibleText(of: view))
+            let state = Self.classify(Self.visibleText(of: view))
+            // The moment an answer lands: working a second ago, quiet now.
+            if activity[id] == .busy, state == .idle {
+                finishedAt[id] = Date()
+                let watched = visibleTabs.contains(id) && NSApp.isActive
+                if !watched { finished.append(id) }
+            }
+            next[id] = state
         }
         if next != activity { activity = next }
+        if !finished.isEmpty {
+            unread.formUnion(finished)
+            updateDockBadge()
+        }
         applyDeferredSwitches()
         restoreDrafts()
         if next.values.contains(where: \.pulses) {

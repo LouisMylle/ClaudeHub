@@ -6,6 +6,8 @@ extension Notification.Name {
     static let newClaudeSessionInFolder = Notification.Name("ClaudeHub.newSessionInFolder")
     /// Menu → "Delete Session": acted on by the window holding the selection.
     static let deleteSelectedSession = Notification.Name("ClaudeHub.deleteSelectedSession")
+    static let showMCPManager = Notification.Name("ClaudeHub.showMCPManager")
+    static let splitActiveTab = Notification.Name("ClaudeHub.splitActiveTab")
     /// The account sessions run as changed, so the limits belong to someone else now.
     static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
 }
@@ -53,10 +55,20 @@ struct ClaudeHubApp: App {
             }
             CommandGroup(after: .pasteboard) {
                 Divider()
+                Button("MCP Servers…") {
+                    NotificationCenter.default.post(name: .showMCPManager, object: nil)
+                }
+                Divider()
                 Button("Delete Session…") {
                     NotificationCenter.default.post(name: .deleteSelectedSession, object: nil)
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Open Tab Beside") {
+                    NotificationCenter.default.post(name: .splitActiveTab, object: nil)
+                }
+                .keyboardShortcut("\\", modifiers: .command)
             }
             // Take over ⌘W: close the active tab, not the window
             CommandGroup(replacing: .saveItem) {
@@ -96,7 +108,7 @@ struct ClaudeHubApp: App {
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
 
-                AccountItems(accounts: accounts, tabs: tabs)
+                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
             }
             CommandMenu("Tabs") {
                 ForEach(1..<10, id: \.self) { number in

@@ -201,6 +201,10 @@ enum ClaudeCommands {
 struct AccountItems: View {
     @ObservedObject var accounts: AccountStore
     @ObservedObject var tabs: TabsModel
+    /// Passed in rather than taken from the environment: this view also builds
+    /// the menu-bar items, and a Commands scene has no environment to take it
+    /// from.
+    @ObservedObject var usage: UsageStore
 
     private var withoutToken: [String] {
         accounts.knownEmails.filter {
@@ -276,21 +280,40 @@ struct AccountItems: View {
 
     private var signedInLabel: String {
         guard let current = accounts.current else { return "Signed-in account" }
-        return "\(current.email) (signed in)"
+        let name = "\(current.email) (signed in)"
+        guard let limits = usage.signedInSummary else { return "\u{26AA}  \(name)" }
+        let dot = AccountStore.dot(session: usage.signedInSession, week: usage.signedInWeek)
+        let best = roomiest == .signedIn && accounts.activeProfile != nil
+            ? "   \u{2190} most room"
+            : ""
+        return "\(dot)  \(name) — \(limits)\(best)"
     }
 
     /// The name you gave it, plus what the token turned out to be — so a saved
     /// account is never just a label you have to take on faith.
     private func menuLabel(for profile: String) -> String {
         let status = accounts.status(of: profile)
-        if status.locked { return "\(profile) — locked in the keychain" }
-        if status.problem != nil { return "\(profile) — token rejected" }
-        if status.isChecking { return "\(profile) — checking…" }
-        switch accounts.isDistinctAccount(profile) {
-        case true: return "\(profile) — another account ✓"
-        case false: return "\(profile) — same account as signed in"
-        default: return profile
+        if status.locked { return "\u{1F512}  \(profile) — locked in the keychain" }
+        if status.problem != nil { return "\u{26D4}  \(profile) — token rejected" }
+        if status.isChecking { return "\u{26AA}  \(profile) — checking…" }
+
+        // What you open this menu to find out: which account still has room.
+        // The dot answers it before the sentence does.
+        let name = accounts.isDistinctAccount(profile) == false
+            ? "\(profile) (same account as signed in)"
+            : profile
+        guard let limits = accounts.limitsSummary(for: profile) else {
+            return "\(accounts.dot(for: profile))  \(name)"
         }
+        let best = roomiest == .saved(profile) && profile != accounts.activeProfile
+            ? "   \u{2190} most room"
+            : ""
+        return "\(accounts.dot(for: profile))  \(name) — \(limits)\(best)"
+    }
+
+    /// Worked out once per menu build, not once per row.
+    private var roomiest: AccountStore.RoomiestAccount? {
+        accounts.roomiest(signedIn: (usage.signedInSession, usage.signedInWeek))
     }
 
     private var brokenProfile: String? {
@@ -315,6 +338,7 @@ struct AccountItems: View {
 struct AccountChip: View {
     @ObservedObject var accounts: AccountStore
     @ObservedObject var tabs: TabsModel
+    @ObservedObject var usage: UsageStore
 
     private var helpText: String {
         if let active = accounts.activeProfile {
@@ -341,7 +365,7 @@ struct AccountChip: View {
 
     var body: some View {
         Menu {
-            AccountItems(accounts: accounts, tabs: tabs)
+            AccountItems(accounts: accounts, tabs: tabs, usage: usage)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon)
@@ -361,6 +385,7 @@ struct AccountChip: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .clickable()
         .help(helpText)
     }
 }

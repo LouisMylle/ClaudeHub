@@ -37,20 +37,13 @@ struct UsageBars: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Color.orange)
                     } else {
-                        Image(systemName: "arrow.clockwise")
-                            .foregroundStyle(Color.secondary)
-                            .rotationEffect(.degrees(usage.isProbing ? 360 : 0))
-                            // Nothing to animate on the way back: a repeatForever
-                            // that is merely re-targeted keeps on turning.
-                            .animation(usage.isProbing
-                                       ? .linear(duration: 1).repeatForever(autoreverses: false)
-                                       : nil,
-                                       value: usage.isProbing)
+                        SpinningRefreshIcon(isSpinning: usage.isProbing)
                     }
                 }
                 .font(.system(size: 11, weight: .medium))
             }
             .buttonStyle(.borderless)
+            .clickable()
             .disabled(usage.isProbing)
         }
         .padding(.horizontal, 12)
@@ -155,5 +148,68 @@ struct UsageBars: View {
         case 1: return .orange
         default: return .green
         }
+    }
+}
+
+/// The refresh glyph, turned by the clock rather than by an implicit animation.
+///
+/// The obvious `.rotationEffect(isProbing ? 360 : 0)` plus `repeatForever` gets
+/// two things wrong, and both are visible on an 11pt icon:
+///
+/// - The store publishes while it is reading, so the body is rebuilt mid-turn
+///   and the repeating animation is re-seeded from wherever the icon happens to
+///   be. The turn stutters and looks like it keeps changing speed.
+/// - `arrow.clockwise` does not turn around the middle of its layout box. Its
+///   arc is centred at y ≈ 0.559 of that box — measured off the rendered glyph
+///   at four point sizes, stable to ±0.003 — so spinning around `.center` walks
+///   the icon around a small circle instead of turning it on the spot.
+///
+/// Driving the angle off the wall clock fixes the first: there is no animation
+/// state to restart, so a rebuild lands on exactly the angle the time says it
+/// should. The measured anchor fixes the second.
+private struct SpinningRefreshIcon: View {
+    var isSpinning: Bool
+
+    /// One turn. A second reads as a flicker at this size; this reads as a turn.
+    private static let period: Double = 1.3
+    /// Where the arc's circle actually sits inside the glyph's layout box.
+    private static let axis = UnitPoint(x: 0.5, y: 0.559)
+
+    /// Where the icon rests once it has stopped, and how it gets there.
+    @State private var restAngle: Double = 0
+
+    var body: some View {
+        Group {
+            if isSpinning {
+                TimelineView(.animation) { context in
+                    icon(angle: Self.angle(at: context.date))
+                }
+            } else {
+                icon(angle: restAngle)
+            }
+        }
+        .onChange(of: isSpinning) { _, spinning in
+            guard !spinning else { return }
+            // Coast to upright from wherever the turn was, rather than snapping
+            // there: a read that finishes fast is otherwise a visible jolt.
+            restAngle = Self.angle(at: .now)
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.3)) { restAngle = 360 }
+            }
+        }
+    }
+
+    private func icon(angle: Double) -> some View {
+        Image(systemName: "arrow.clockwise")
+            .foregroundStyle(Color.secondary)
+            .rotationEffect(.degrees(angle), anchor: Self.axis)
+    }
+
+    /// The angle straight from the clock: nothing to fall out of step with, and
+    /// nothing to restart when the view is rebuilt.
+    private static func angle(at date: Date) -> Double {
+        let phase = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: period) / period
+        return phase * 360
     }
 }

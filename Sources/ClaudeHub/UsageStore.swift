@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import SwiftTerm
 
+extension String {
+    /// The string, or nothing at all — for the many places where an empty
+    /// string would otherwise be formatted into a sentence as a gap.
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
 /// One rate-limit window as `/usage` reports it.
 struct UsageWindow: Equatable {
     let percent: Int
@@ -48,9 +54,21 @@ final class UsageStore: ObservableObject {
 
     private var folder: () -> String? = { nil }
     private var probe: LocalProcessTerminalView?
-    /// The saved account the running probe was started for, so a failure can
-    /// name it instead of blaming "claude".
-    private(set) var probeAccount: String?
+    /// The signed-in account's own windows, kept current whichever account is
+    /// active — otherwise the one account you cannot see is the one you would
+    /// be switching back to.
+    @Published private(set) var signedInSession: UsageWindow?
+    @Published private(set) var signedInWeek: UsageWindow?
+    @Published private(set) var signedInAt: Date?
+    private var lastProbeAt: Date?
+    private let probeInterval: TimeInterval = 120
+    /// The hidden session has its own busy flag. Sharing one with the API
+    /// reading meant either could lock the other out — and a reading that never
+    /// starts looks exactly like an account with nothing to report.
+    private var probeBusy = false
+    /// Why the signed-in reading failed, kept apart from the bars' own error so
+    /// one account's trouble is never shown against another's numbers.
+    @Published private(set) var signedInError: String?
     private var timer: Timer?
     private var retries = 0
     /// The API reading costs a real (one-token) request, so it is not asked
@@ -72,9 +90,11 @@ final class UsageStore: ObservableObject {
         self.folder = folder
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
+            self?.refreshSignedInLimits()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.refresh()
+            self?.refreshSignedInLimits()
         }
     }
 
@@ -82,6 +102,24 @@ final class UsageStore: ObservableObject {
     /// request; the signed-in account's come from reading `/usage`, which costs
     /// nothing. Worth saying out loud in the tooltip.
     var readsFromAPI: Bool { TokenStore.activeProfile != nil }
+
+    /// The signed-in account's line for the menu, whichever account is active.
+    /// A failure is said out loud rather than left as an empty row.
+    var signedInSummary: String? {
+        AccountStore.summary(session: signedInSession, week: signedInWeek) ?? signedInError
+    }
+
+    /// The same one-line shape the account menu uses for saved accounts.
+    var summary: String? {
+        let now = Date()
+        let parts = [("5h", session), ("week", week)].compactMap { label, window -> String? in
+            guard let window else { return nil }
+            let left = window.countdown(from: now)?
+                .replacingOccurrences(of: "Resets in ", with: "")
+            return "\(label) \(window.percent)%\(left.map { " (\($0))" } ?? "")"
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     /// Whose limits these are — named, always. The whole confusion this guards
     /// against is a percentage that belongs to another account.
@@ -139,10 +177,11 @@ final class UsageStore: ObservableObject {
             }
             forceNextPoll = false
             lastAPIPoll = Date()
-            probeAccount = profile
             let era = generation
             TokenCheck.limits(token: token) { [weak self] headers in
-                guard let self, self.generation == era else { return }
+                guard let self else { return }
+                self.isProbing = false
+                guard self.generation == era else { return }
                 let windows = Self.windows(from: headers)
                 guard windows.session != nil || windows.week != nil else {
                     return self.startTerminalProbe(in: cwd)
@@ -161,9 +200,22 @@ final class UsageStore: ObservableObject {
         startTerminalProbe(in: cwd)
     }
 
+    /// Keeps the signed-in account's numbers current while a saved account is
+    /// the active one. Reading them is free; the hidden session is not, which
+    /// is why it is throttled and stops behind an idle window.
+    func refreshSignedInLimits() {
+        guard TokenStore.activeProfile != nil else { return }    // refresh() covers the rest
+        guard !probeBusy, NSApplication.shared.isActive else { return }
+        guard Date().timeIntervalSince(lastProbeAt ?? .distantPast) >= probeInterval else { return }
+        guard let cwd = folder() else { return }
+        startTerminalProbe(in: cwd)
+    }
+
     /// Reads the limits the way a person would: by looking at `/usage`.
     private func startTerminalProbe(in cwd: String) {
-        isProbing = true
+        probeBusy = true
+        lastProbeAt = Date()
+        if TokenStore.activeProfile == nil { isProbing = true }
         if probe == nil {
             startProbe(in: cwd)
             // Claude Code takes anywhere from a few seconds to half a minute to
@@ -258,13 +310,9 @@ final class UsageStore: ObservableObject {
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
-        if let profile = TokenStore.activeProfile,
-           let token = TokenStore.cachedToken(for: profile) {
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-            probeAccount = profile
-        } else {
-            probeAccount = nil
-        }
+        // Deliberately no CLAUDE_CODE_OAUTH_TOKEN: this session is here to read
+        // the signed-in account's limits, and without one it does exactly that
+        // whichever account ClaudeHub is running sessions as.
 
         let claude = TerminalManager.shared.claudePath
         view.startProcess(
@@ -336,33 +384,42 @@ final class UsageStore: ObservableObject {
         // login is told about its 5-hour and weekly windows. That is a settled
         // answer — stop asking every minute and say so.
         if Self.panelWithoutLimits(screen) {
+            // The hidden session runs as the signed-in account, so this is
+            // that account having nothing to report — not the active one.
             Self.log(screen)
             teardown()
-            session = nil
-            week = nil
-            lastUpdated = Date()
-            measuredAccount = probeAccount
+            probeBusy = false
+            signedInAt = Date()
+            signedInError = "The signed-in account reports no usage limits."
+            if TokenStore.activeProfile == nil {
+                session = nil
+                week = nil
+                lastUpdated = Date()
+                measuredAccount = nil
+                limitsUnavailable = true
+            }
             isProbing = false
-            limitsUnavailable = true
-            errorMessage = probeAccount.map {
-                """
-                Claude Code does not report the 5-hour and weekly limits for \($0): \
-                a saved token authenticates as "Claude API", and only the account \
-                you are signed in as is told about its subscription windows. \
-                Switch to the signed-in account to see limits again.
-                """
-            } ?? "This account reports no usage limits."
+            errorMessage = "The signed-in account reports no usage limits."
             return
         }
 
         let parsed = Self.parse(screen)
         if parsed.session != nil || parsed.week != nil {
-            session = parsed.session
-            week = parsed.week
-            lastUpdated = Date()
-            errorMessage = nil
-            limitsUnavailable = false
-            measuredAccount = probeAccount
+            signedInSession = parsed.session
+            signedInWeek = parsed.week
+            signedInAt = Date()
+            signedInError = nil
+            probeBusy = false
+            // The bars follow the active account; this reading is theirs only
+            // when that is the account it just measured.
+            if TokenStore.activeProfile == nil {
+                session = parsed.session
+                week = parsed.week
+                lastUpdated = Date()
+                errorMessage = nil
+                limitsUnavailable = false
+                measuredAccount = nil
+            }
             isProbing = false
             return
         }
@@ -449,12 +506,19 @@ final class UsageStore: ObservableObject {
     }
 
     private func fail(_ message: String) {
-        errorMessage = probeAccount.map { "\($0): \(message)" } ?? message
+        probeBusy = false
+        signedInError = message
         isProbing = false
+        // The bars are only this reading's to speak for when they are showing
+        // the account it was reading.
+        if TokenStore.activeProfile == nil { errorMessage = message }
     }
 
     private func teardown() {
+        // Bumping the era abandons whatever read loop was running, so its flag
+        // has to be released here or the next reading never starts.
         generation += 1
+        probeBusy = false
         probe?.terminate()
         probe = nil
     }

@@ -1,5 +1,6 @@
-import Foundation
+import AppKit
 import Combine
+import Foundation
 
 /// Who Claude Code is currently logged in as, per `claude auth status --json`.
 struct ClaudeAccount: Equatable {
@@ -33,6 +34,11 @@ struct ProfileStatus: Equatable {
     /// The organisation the API billed a test request to — the one fact a
     /// setup-token will disclose about whose it is.
     var organizationID: String?
+    /// How much of this account's windows is gone, so the menu can answer the
+    /// question you actually open it with: which account has room left.
+    var session: UsageWindow?
+    var week: UsageWindow?
+    var limitsAt: Date?
     /// Non-nil means the API refused the token — this account cannot run.
     var problem: String?
     /// Non-nil means we could not reach the API; the token may still be fine.
@@ -172,6 +178,7 @@ final class AccountStore: ObservableObject {
         }
         TokenStore.prime(profiles) { [weak self] in
             self?.verifyAll()
+            self?.refreshLimits(force: true)
         }
     }
 
@@ -217,6 +224,145 @@ final class AccountStore: ObservableObject {
 
     func verifyAll() {
         for profile in tokenProfiles { verify(profile) }
+    }
+
+    // MARK: - How much room each account has left
+
+    private var limitsTimer: Timer?
+    private var lastLimitsPoll: Date?
+    private let limitsInterval: TimeInterval = 180
+
+    /// Keeps every saved account's limits current, so switching is a decision
+    /// rather than a guess.
+    ///
+    /// One small request per account, only while the window is in front —
+    /// reading a limit is not free, and numbers nobody is looking at are not
+    /// worth paying for.
+    func startLimitPolling() {
+        guard limitsTimer == nil else { return }
+        limitsTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshLimits()
+        }
+        refreshLimits()
+    }
+
+    func refreshLimits(force: Bool = false) {
+        guard force || NSApplication.shared.isActive else { return }
+        if !force, let last = lastLimitsPoll,
+           Date().timeIntervalSince(last) < limitsInterval { return }
+        lastLimitsPoll = Date()
+        for profile in tokenProfiles where status(of: profile).problem == nil {
+            guard let token = TokenStore.cachedToken(for: profile) else { continue }
+            TokenCheck.limits(token: token) { [weak self] headers in
+                guard let self else { return }
+                let windows = UsageStore.windows(from: headers)
+                guard windows.session != nil || windows.week != nil else { return }
+                var status = self.status(of: profile)
+                status.session = windows.session
+                status.week = windows.week
+                status.limitsAt = Date()
+                self.setStatus(status, for: profile, persist: false)
+            }
+        }
+    }
+
+    /// "5h 4%, resets in 4 hr 48 min · week 10%", or nil until it is known.
+    func limitsSummary(for profile: String) -> String? {
+        let status = self.status(of: profile)
+        return AccountStore.summary(session: status.session, week: status.week)
+    }
+
+    static func summary(session: UsageWindow?, week: UsageWindow?) -> String? {
+        let now = Date()
+        var parts: [String] = []
+        // Both windows say when they come back: which of the two binds first
+        // is the whole question, and it cannot be answered from percentages
+        // alone. The panel's own wording stands in when a reset could not be
+        // turned into a date, so a row is never left silent about it.
+        if let session {
+            let left = session.countdown(from: now)
+                .map { $0.replacingOccurrences(of: "Resets in ", with: "resets in ") }
+                ?? session.resets.nonEmpty.map { "resets \($0)" }
+            parts.append("5h \(session.percent)%\(left.map { ", \($0)" } ?? "")")
+        }
+        if let week {
+            let left = week.countdown(from: now)
+                .map { $0.replacingOccurrences(of: "Resets in ", with: "") }
+                ?? week.resets.nonEmpty
+            parts.append("week \(week.percent)%\(left.map { " (\($0))" } ?? "")")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
+
+    /// A menu row is scanned, not read: the dot carries the answer and the
+    /// numbers back it up. Worst of the two windows, because the one that runs
+    /// out first is the one that stops you.
+    static func dot(session: UsageWindow?, week: UsageWindow?) -> String {
+        let levels = [session?.level, week?.level].compactMap { $0 }
+        guard let worst = levels.max() else { return "\u{26AA}" }        // not known yet
+        switch worst {
+        case 2: return "\u{1F534}"                                       // nearly out
+        case 1: return "\u{1F7E1}"                                       // getting there
+        default: return "\u{1F7E2}"                                      // room to work
+        }
+    }
+
+    func dot(for profile: String) -> String {
+        let status = self.status(of: profile)
+        return AccountStore.dot(session: status.session, week: status.week)
+    }
+
+    /// Which account to go to next.
+    enum RoomiestAccount: Equatable {
+        case signedIn
+        case saved(String)
+    }
+
+    /// The account with the most room, judged against the clock rather than on
+    /// the percentages alone.
+    ///
+    /// A raw percentage is the wrong comparison. 80% of a five-hour window that
+    /// resets in ten minutes is nearly free again; 55% of a weekly window with
+    /// six days still to run is not. So each window is scored as what is left
+    /// of the budget over what is left of the window: above 1 means the budget
+    /// is outlasting the clock, below 1 means it is running out first. An
+    /// account is worth no more than its tightest window, so the two are
+    /// combined by taking the worse — which is the one that will stop you.
+    func roomiest(signedIn: (session: UsageWindow?, week: UsageWindow?)) -> RoomiestAccount? {
+        var scored: [(account: RoomiestAccount, room: Double)] = []
+        if let room = Self.headroom(session: signedIn.session, week: signedIn.week) {
+            scored.append((.signedIn, room))
+        }
+        for profile in tokenProfiles {
+            let status = self.status(of: profile)
+            guard status.problem == nil,
+                  let room = Self.headroom(session: status.session, week: status.week) else { continue }
+            scored.append((.saved(profile), room))
+        }
+        // Nothing to point at when there is nothing to compare it with.
+        guard scored.count > 1 else { return nil }
+        return scored.max { $0.room < $1.room }?.account
+    }
+
+    /// The tighter of the two windows, or nil when neither has been read.
+    static func headroom(session: UsageWindow?, week: UsageWindow?) -> Double? {
+        let rooms = [headroom(session, length: 5 * 3600),
+                     headroom(week, length: 7 * 86_400)].compactMap { $0 }
+        return rooms.min()
+    }
+
+    /// Budget left ÷ window left. A window about to reset scores high however
+    /// spent it is, which is the point: it is about to hand the budget back.
+    private static func headroom(_ window: UsageWindow?,
+                                 length: TimeInterval,
+                                 now: Date = Date()) -> Double? {
+        guard let window else { return nil }
+        let budgetLeft = Double(100 - window.percent) / 100
+        guard let resetsAt = window.resetsAt else { return budgetLeft }
+        let timeLeft = max(0, resetsAt.timeIntervalSince(now))
+        // Clamped so a reset seconds away scores high but not infinitely so.
+        let windowLeft = min(max(timeLeft / length, 0.01), 1)
+        return budgetLeft / windowLeft
     }
 
     /// Asks macOS for the token again, which is what raises the keychain panel

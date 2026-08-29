@@ -49,6 +49,15 @@ struct ContentView: View {
         return terminalManager.activity(of: tab.id)
     }
 
+    /// What is on screen, and therefore what counts as read. Only while the
+    /// app is in front: a session that finished behind another window is
+    /// precisely the one you need told about.
+    private func syncVisibleTabs() {
+        let visible = Set(tabs.visiblePanes)
+        terminalManager.visibleTabs = visible
+        if NSApplication.shared.isActive { terminalManager.markRead(visible) }
+    }
+
     private func session(withID id: String) -> ClaudeSession? {
         for project in store.projects {
             if let session = project.sessions.first(where: { $0.id == id }) {
@@ -71,6 +80,10 @@ struct ContentView: View {
             // thread) and checks each one: a token revoked since it was saved
             // should be visible on the chip, not on your first message.
             accounts.primeTokens()
+            // Every saved account's limits, not just the active one: the menu
+            // is where you decide which account to go to next.
+            accounts.startLimitPolling()
+            syncVisibleTabs()
             updates.check()
             // The probe needs a folder Claude Code already trusts, so it waits
             // for the first scan — off the sidebar's own update cycle.
@@ -79,6 +92,8 @@ struct ContentView: View {
 
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
+            // Coming back to the window is when what is on screen counts as seen.
+            syncVisibleTabs()
             // Coming back from the login page in the browser lands here.
             accounts.refresh()
             // The limits are not polled behind a window nobody is watching, so
@@ -96,12 +111,28 @@ struct ContentView: View {
         .onChange(of: tabs.activeTabID) { _, _ in
             // Keep the sidebar in sync with the active tab (nil for fresh-session tabs)
             selectedSessionID = tabs.activeTab?.sessionID
+            syncVisibleTabs()
+        }
+        .onChange(of: tabs.panes) { _, panes in
+            syncVisibleTabs()
+            // A new pane arriving or leaving invalidates the old proportions.
+            if paneFractions.count != panes.count { paneFractions = [] }
         }
         .onReceive(NotificationCenter.default.publisher(for: .newClaudeSessionInFolder)) { _ in
             newSessionInChosenFolder()
         }
         .onReceive(NotificationCenter.default.publisher(for: .deleteSelectedSession)) { _ in
             requestDeletionOfSelection()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showMCPManager)) { _ in
+            showMCPManager = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .splitActiveTab)) { _ in
+            // ⌘\ puts the next tab along beside this one, which is what you
+            // want it for: a session and the terminal you are running against
+            // it, side by side.
+            guard let next = tabs.tabs.first(where: { !tabs.panes.contains($0.id) }) else { return }
+            tabs.splitOff(next.id)
         }
         .onReceive(NotificationCenter.default.publisher(for: .activeAccountChanged)) { _ in
             // Switching account switches the whole window, not just what you
@@ -135,6 +166,7 @@ struct ContentView: View {
                         SessionRow(session: session,
                                    activity: activity(of: session),
                                    isHidden: store.hiddenSessionIDs.contains(session.id))
+                            .clickable()
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
                     }
@@ -147,6 +179,7 @@ struct ContentView: View {
                 }
                 .textCase(nil)
             }
+
         }
         .listStyle(.sidebar)
         .onDeleteCommand { requestDeletionOfSelection() }
@@ -156,7 +189,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 UsageBars(usage: usage)
                 HStack {
-                    AccountChip(accounts: accounts, tabs: tabs)
+                    AccountChip(accounts: accounts, tabs: tabs, usage: usage)
                 Spacer()
                 Text("\(store.projects.map(\.sessions.count).reduce(0, +)) sessions")
                     .font(.caption)
@@ -200,9 +233,6 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem {
                 Menu {
-                    Button("New Session in Current Folder") { newSession() }
-                        .disabled(tabs.activeTab == nil)
-                    Button("New Session in Folder…") { newSessionInChosenFolder() }
                     Button("New Terminal Tab") { tabs.openNewTab() }
                     if !store.projects.isEmpty {
                         Divider()
@@ -222,14 +252,6 @@ struct ContentView: View {
             }
             ToolbarItem {
                 Button {
-                    showMCPManager = true
-                } label: {
-                    Label("MCP Servers", systemImage: "server.rack")
-                }
-                .help("Manage Claude Code MCP servers")
-            }
-            ToolbarItem {
-                Button {
                     store.refresh()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -244,20 +266,160 @@ struct ContentView: View {
         }
     }
 
+    /// The panes, side by side, with a handle between them you can drag.
+    ///
+    /// Widths are kept as fractions rather than points, so the split holds its
+    /// proportions when the window is resized instead of one pane swallowing
+    /// every extra pixel.
+    private var paneStack: some View {
+        GeometryReader { geometry in
+            let ids = tabs.visiblePanes
+            let available = max(1, geometry.size.width
+                                - Self.splitStripWidth
+                                - Self.handleWidth * CGFloat(max(0, ids.count - 1)))
+            let widths = paneWidths(count: ids.count, available: available)
+            HStack(spacing: 0) {
+                ForEach(Array(ids.enumerated()), id: \.element) { index, id in
+                    if let paneTab = tabs.tab(withID: id) {
+                        pane(paneTab, at: index)
+                            .frame(width: widths[index])
+                        if index < ids.count - 1 {
+                            PaneDivider(
+                                width: Self.handleWidth,
+                                onChange: { resizePanes(at: index, by: $0, available: available) },
+                                onEnd: { paneDragBaseline = nil }
+                            )
+                        }
+                    }
+                }
+                splitDropStrip
+            }
+        }
+    }
+
+    private static let handleWidth: CGFloat = 6
+    private static let splitStripWidth: CGFloat = 26
+
+    private func paneWidths(count: Int, available: CGFloat) -> [CGFloat] {
+        paneShares(count).map { available * CGFloat($0) }
+    }
+
+    /// Always sums to one, whatever state the stored fractions are in.
+    private func paneShares(_ count: Int) -> [Double] {
+        let equal = Array(repeating: 1.0 / Double(max(count, 1)), count: count)
+        guard paneFractions.count == count else { return equal }
+        let total = paneFractions.reduce(0, +)
+        guard total > 0 else { return equal }
+        return paneFractions.map { $0 / total }
+    }
+
+    /// Drag translation is measured from where the drag began, so the widths at
+    /// that moment are the ones to add it to — using the live ones would apply
+    /// the same movement again on every update.
+    private func resizePanes(at index: Int, by dx: CGFloat, available: CGFloat) {
+        let count = tabs.visiblePanes.count
+        let base = paneDragBaseline ?? paneShares(count)
+        if paneDragBaseline == nil { paneDragBaseline = base }
+        guard base.indices.contains(index + 1), available > 0 else { return }
+
+        // A pane narrower than this is a column of broken lines, not a view.
+        let minimum = min(0.2, 260 / Double(available))
+        var delta = Double(dx) / Double(available)
+        delta = max(delta, minimum - base[index])
+        delta = min(delta, base[index + 1] - minimum)
+
+        var next = base
+        next[index] += delta
+        next[index + 1] -= delta
+        paneFractions = next
+    }
+
+    /// One terminal, with a header when it is sharing the window.
+    @ViewBuilder
+    private func pane(_ tab: TerminalTab, at index: Int) -> some View {
+        let isFocused = tab.id == tabs.activeTabID
+        VStack(spacing: 0) {
+            if tabs.panes.count > 1 {
+                HStack(spacing: 6) {
+                    TabStrip(pane: index, accounts: accounts)
+                    Spacer(minLength: 4)
+                    Button { tabs.maximisePane(index) } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .frame(width: 16, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Give this tab the whole window again — the other tabs stay open and keep running")
+                    Button { tabs.closePane(index) } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .frame(width: 16, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close this pane — the tab stays open")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(isFocused ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.04))
+                .contentShape(Rectangle())
+                .clickable()
+                .onTapGesture(count: 2) { tabs.maximisePane(index) }
+                .onTapGesture { tabs.activeTabID = tab.id }
+                // Dropping a tab on a pane's header puts it in that pane.
+                .dropDestination(for: String.self) { ids, _ in
+                    guard let id = ids.first else { return false }
+                    tabs.show(id, inPane: index)
+                    return true
+                }
+                Divider()
+            }
+            TerminalHostView(tab: tab,
+                             generation: terminalManager.generation,
+                             isFocused: isFocused)
+                .background(terminalBackground)
+        }
+    }
+
+    /// The edge you drag a tab to when you want it beside what is already
+    /// there rather than instead of it.
+    @State private var splitTargeted = false
+    @State private var paneFractions: [Double] = []
+    @State private var paneDragBaseline: [Double]?
+
+    private var splitDropStrip: some View {
+        Rectangle()
+            .fill(splitTargeted ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06))
+            .frame(width: Self.splitStripWidth)
+            .overlay(
+                Image(systemName: "rectangle.split.2x1")
+                    .font(.system(size: 11))
+                    .foregroundStyle(splitTargeted ? Color.accentColor : Color.secondary.opacity(0.6))
+            )
+            .animation(.easeOut(duration: 0.15), value: splitTargeted)
+            .dropDestination(for: String.self) { ids, _ in
+                guard let id = ids.first else { return false }
+                tabs.splitOff(id)
+                return true
+            } isTargeted: { splitTargeted = $0 }
+            .help("Drop a tab here to open it beside this one (⌘\\)")
+    }
+
     @ViewBuilder
     private var detail: some View {
         if let tab = tabs.activeTab {
             VStack(spacing: 0) {
                 TabBarView(newSession: { newSession() },
                            newSessionElsewhere: { newSessionInChosenFolder() },
-                           accounts: accounts)
+                           accounts: accounts,
+                           usage: usage)
                 Divider()
                 if tab.isCommand, let link = terminalManager.signInURL(in: tab.id) {
                     SignInLinkBar(url: link)
                     Divider()
                 }
-                TerminalHostView(tab: tab, generation: terminalManager.generation)
-                    .background(terminalBackground)
+                paneStack
             }
             .navigationTitle(tab.title)
             .navigationSubtitle(tab.cwd)
@@ -328,22 +490,8 @@ struct ContentView: View {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: session.cwd)
         }
         Divider()
-        Button("Copy Resume Command") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(session.resumeCommand, forType: .string)
-        }
-        Button("Copy Session ID") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(session.id, forType: .string)
-        }
-        Divider()
         if store.hiddenSessionIDs.contains(session.id) {
             Button("Unhide Session") { store.setHidden(session, false) }
-        } else {
-            Button("Hide Session") {
-                if selectedSessionID == session.id { selectedSessionID = nil }
-                store.setHidden(session, true)
-            }
         }
         Button("Delete Session…", role: .destructive) {
             requestDeletion([session], scope: "“\(session.title)”")
@@ -432,36 +580,80 @@ struct ContentView: View {
                                 configuration: NSWorkspace.OpenConfiguration())
     }
 
+    /// Opens the session in Terminal.app by handing it a `.command` file.
+    ///
+    /// This used to drive Terminal with AppleScript, which needs an automation
+    /// grant macOS will not give an ad-hoc signed app without a prompt — and
+    /// when it was refused, the menu item simply did nothing. A double-clickable
+    /// script needs no permission at all: Terminal is what opens `.command`.
     private func openInTerminalApp(_ session: ClaudeSession) {
-        let command = session.resumeCommand
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "\(command)"
-        end tell
+        let folder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClaudeHub")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let script = folder.appendingPathComponent("resume-\(session.id).command")
+        let body = """
+        #!/bin/zsh
+        cd \(ClaudeSession.shellQuote(session.cwd)) || exit 1
+        exec \(session.resumeCommand)
         """
-        DispatchQueue.global().async {
-            NSAppleScript(source: script)?.executeAndReturnError(nil)
+        do {
+            try body.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: script.path)
+        } catch {
+            deleteError = "Could not write the Terminal script: \(error.localizedDescription)"
+            return
         }
+        NSWorkspace.shared.open(script)
     }
 }
 
 // MARK: - Tab bar
 
-private struct TabBarView: View {
+/// The chips of one pane, grouped by the project they belong to.
+///
+/// Tabs from four projects in one row are four projects' worth of names with
+/// nothing to tell them apart; the sidebar has folders for exactly this reason.
+/// So the strip keeps each project's tabs together, in the order the projects
+/// were first opened, under the folder's own name.
+private struct TabStrip: View {
+    let pane: Int
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
-    let newSession: () -> Void
-    let newSessionElsewhere: () -> Void
     @ObservedObject var accounts: AccountStore
 
+    private var sections: [(folder: String, tabs: [TerminalTab])] {
+        var order: [String] = []
+        var byFolder: [String: [TerminalTab]] = [:]
+        for tab in tabs.tabs(inPane: pane) {
+            let name = TabsModel.folderName(tab.cwd)
+            if byFolder[name] == nil { order.append(name) }
+            byFolder[name, default: []].append(tab)
+        }
+        return order.map { ($0, byFolder[$0] ?? []) }
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(tabs.tabs) { tab in
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(Array(sections.enumerated()), id: \.element.folder) { index, section in
+                    // A quiet heading with a rule before it, the way the
+                    // sidebar separates its folders. A capsule with an icon
+                    // competes with the tabs for attention it has not earned.
+                    if index > 0 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.12))
+                            .frame(width: 1, height: 16)
+                            .padding(.horizontal, 4)
+                    }
+                    Text(section.folder.uppercased())
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(0.5)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .padding(.trailing, 2)
+                        .help(section.tabs.first?.cwd ?? section.folder)
+                    ForEach(section.tabs) { tab in
                         TabChip(
                             tab: tab,
                             isActive: tab.id == tabs.activeTabID,
@@ -469,46 +661,136 @@ private struct TabBarView: View {
                             accountLabel: accounts.effectiveLabel,
                             account: terminalManager.profile(of: tab),
                             accountIsLive: terminalManager.hasLaunched(tab.id),
+                            activeAccount: accounts.activeProfile,
                             fellBackFrom: terminalManager.fallbackAccount(of: tab.id),
                             pending: terminalManager.pendingSwitch(of: tab.id),
-                            activate: { tabs.activeTabID = tab.id },
+                            activate: { tabs.show(tab.id) },
+                            splitOff: { tabs.splitOff(tab.id) },
+                            canSplit: tabs.canSplit,
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
                         )
                     }
                 }
-                .padding(.vertical, 5)
+            }
+            .padding(.vertical, 5)
+        }
+    }
+}
+
+private struct TabBarView: View {
+    @EnvironmentObject var tabs: TabsModel
+    @ObservedObject var terminalManager = TerminalManager.shared
+    let newSession: () -> Void
+    let newSessionElsewhere: () -> Void
+    @ObservedObject var accounts: AccountStore
+    @ObservedObject var usage: UsageStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Split, and each pane carries its own strip in its header — one
+            // row of everybody's tabs would say nothing about which pane a tab
+            // belongs to.
+            if tabs.groups.count <= 1 {
+                TabStrip(pane: 0, accounts: accounts)
+            } else {
+                Spacer(minLength: 0)
             }
             Menu {
                 Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
                 Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
                 Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
                 Divider()
-                AccountItems(accounts: accounts, tabs: tabs)
+                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
             } label: {
                 Image(systemName: "gauge.with.needle")
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .clickable()
             .help("Usage, limits and account switching (⌘U)")
+            if tabs.tabs.count > 1 {
+                Menu {
+                    Section("Open beside this one") {
+                        ForEach(tabs.tabs.filter { !tabs.panes.contains($0.id) }) { tab in
+                            Button(tab.title) { tabs.splitOff(tab.id) }
+                        }
+                    }
+                    if tabs.groups.count > 1 {
+                        Divider()
+                        Button("Close Other Panes") { tabs.maximisePane(tabs.focusedPane) }
+                    }
+                } label: {
+                    Image(systemName: "rectangle.split.2x1")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .clickable()
+                .help("Show two or three tabs side by side (⌘\\) — or drag a tab to the right edge")
+            }
             Menu {
-                Button("New Session Here") { newSession() }
-                Button("New Session in Folder…") { newSessionElsewhere() }
-                Button("New Terminal Here") { tabs.openNewTab() }
+                Section(TabsModel.folderName(tabs.currentFolder)) {
+                    Button("New Claude Session") { newSession() }
+                    Button("New Terminal") { tabs.openNewTab() }
+                }
+                Divider()
+                Button("New Claude Session in Folder…") { newSessionElsewhere() }
             } label: {
                 Image(systemName: "plus")
-            } primaryAction: {
-                newSession()
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("New Claude session in this folder (⌘N) — hold for a terminal tab or another folder")
+            .clickable()
+            .help("New Claude session or terminal in this folder — both open in \(TabsModel.folderName(tabs.currentFolder))")
             .padding(.trailing, 8)
         }
         .padding(.leading, 8)
         .background(.bar)
+    }
+}
+
+/// The handle between two panes: VS Code's blue line, and the cursor that says
+/// it can be dragged.
+private struct PaneDivider: View {
+    let width: CGFloat
+    let onChange: (CGFloat) -> Void
+    let onEnd: () -> Void
+
+    @State private var hovering = false
+    @State private var dragging = false
+
+    var body: some View {
+        Rectangle()
+            .fill(hovering || dragging ? Color.accentColor : Color.primary.opacity(0.14))
+            .frame(width: width)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                hovering = inside
+                if inside {
+                    NSCursor.resizeLeftRight.set()
+                } else if !dragging {
+                    NSCursor.arrow.set()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        dragging = true
+                        // Held through the drag: the pointer leaves the handle
+                        // as soon as it moves, and the cursor should not.
+                        NSCursor.resizeLeftRight.set()
+                        onChange(value.translation.width)
+                    }
+                    .onEnded { _ in
+                        dragging = false
+                        onEnd()
+                        if !hovering { NSCursor.arrow.set() }
+                    }
+            )
+            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -521,15 +803,78 @@ private struct TabChip: View {
     let account: String?
     /// True once the tab is running, so the account is a fact, not a plan.
     let accountIsLive: Bool
+    /// The account new sessions run as, so a tab can stay quiet when it matches
+    /// and speak up when it does not.
+    let activeAccount: String?
     /// Set when the tab wanted a saved account and had to start without it.
     let fellBackFrom: String?
     /// Set when the tab could not move to the new account yet, and why.
     let pending: (account: String, waitingOnPaste: Bool)?
     let activate: () -> Void
+    let splitOff: () -> Void
+    let canSplit: Bool
     let restart: () -> Void
     let close: () -> Void
 
+    @State private var hovering = false
+
     var body: some View {
+        HStack(spacing: 5) {
+            // Everything but the close button is the drag handle: a chip that
+            // is itself draggable spends the first click deciding whether you
+            // meant to drag, and that click was meant for the ✕.
+            content
+                .contentShape(Rectangle())
+                .draggable(tab.id)
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    // The glyph stays small; what you have to hit does not.
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            // Four idle tabs are four crosses you are not going to press. The
+            // space stays reserved either way, so nothing shifts under the
+            // pointer as it arrives.
+            .opacity(isActive || hovering ? 1 : 0)
+            .allowsHitTesting(isActive || hovering)
+            .help("Close tab (⌘W)")
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 3)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isActive ? Color.accentColor.opacity(0.18)
+                      : hovering ? Color.primary.opacity(0.07) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isActive ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
+        )
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .contentShape(Rectangle())
+        .clickable()
+        .help("\(tab.cwd)\n\(account.map { "Running as \($0)" } ?? "Running as the signed-in account")")
+        .onTapGesture(perform: activate)
+        .contextMenu {
+            if canSplit {
+                Button("Open Beside") { splitOff() }
+            }
+            Text(fellBackFrom.map { "Wanted \($0) — running on the signed-in account" }
+                 ?? account.map { "Running as \($0)" }
+                 ?? "Running as the signed-in account")
+            Button(tab.sessionID == nil
+                   ? "Restart Tab"
+                   : "Restart as \(accountLabel)") { restart() }
+            Button("Close Tab") { close() }
+        }
+    }
+
+    private var content: some View {
         HStack(spacing: 5) {
             if activity == .dead {
                 Button(action: restart) {
@@ -548,6 +893,7 @@ private struct TabChip: View {
             }
             Text(tab.title)
                 .font(.callout)
+                .foregroundStyle(isActive ? .primary : .secondary)
                 .lineLimit(1)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)
@@ -578,46 +924,19 @@ private struct TabChip: View {
                         for \(fellBackFrom) could not be read. Fix it in the \
                         account menu, then restart the tab.
                         """)
-            } else if let account {
+            } else if let account, account != activeAccount {
+                // Only when it differs from the account you are working on:
+                // the same label on every tab is decoration, and it is the odd
+                // one out you need to be able to spot.
                 Text(TabsModel.shortLabel(account))
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(Color.accentColor.opacity(accountIsLive ? 0.22 : 0.10), in: Capsule())
                     .help(accountIsLive
-                          ? "Running as \(account)"
+                          ? "Running as \(account) — not the account you are on now"
                           : "Will start as \(account)")
             }
-            Button(action: close) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Close tab")
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isActive ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: activate)
-        .contextMenu {
-            // Switching account already restarts every conversation; this is
-            // for the single tab you want moved or simply started again.
-            Text(fellBackFrom.map { "Wanted \($0) — running on the signed-in account" }
-                 ?? account.map { "Running as \($0)" }
-                 ?? "Running as the signed-in account")
-            Button(tab.sessionID == nil
-                   ? "Restart Tab"
-                   : "Restart as \(accountLabel)") { restart() }
-            Button("Close Tab") { close() }
         }
     }
 }
@@ -714,6 +1033,7 @@ private struct ProjectHeader<MenuContent: View>: View {
                     .font(.system(size: 12))
             }
             .buttonStyle(.borderless)
+            .clickable()
             .opacity(isHovering ? 1 : 0)
             // Keeps the button clear of the sidebar scroll bar.
             .padding(.trailing, 8)

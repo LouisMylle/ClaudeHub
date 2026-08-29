@@ -51,6 +51,10 @@ struct TerminalTab: Identifiable, Hashable {
 final class TabsModel: ObservableObject {
     @Published var tabs: [TerminalTab] = []
     @Published var activeTabID: String?
+    /// The tabs of each pane, left to right — see `show(_:)`.
+    @Published private(set) var groups: [[String]] = []
+    /// Which tab each pane is showing.
+    @Published private(set) var groupActive: [String] = []
 
     var activeTab: TerminalTab? {
         tabs.first { $0.id == activeTabID }
@@ -70,14 +74,14 @@ final class TabsModel: ObservableObject {
         // Same session under another account is a separate tab, not a clash.
         let id = Self.tabID(session: session.id, profile: signedIn ? "signed-in" : profile)
         if tabs.contains(where: { $0.id == id }) {
-            activeTabID = id
+            show(id)
             return
         }
         // The conversation is already open — under an account, or as the tab it
         // was started in. Clicking its row brings that tab forward instead of
         // opening a second copy of the same chat.
         if profile == nil, !signedIn, let open = tab(forSessionID: session.id) {
-            activeTabID = open.id
+            show(open.id)
             return
         }
         append(TerminalTab(
@@ -141,15 +145,25 @@ final class TabsModel: ObservableObject {
     /// ⌘1–⌘9
     func activate(index: Int) {
         guard tabs.indices.contains(index) else { return }
-        activeTabID = tabs[index].id
+        show(tabs[index].id)
     }
 
     func close(_ id: String) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: index)
         TerminalManager.shared.closeTerminal(for: id)
+
+        // Its pane shows whatever else it holds, or folds away when it held
+        // nothing else.
+        let pane = group(of: id)
+        detach(id)
         if activeTabID == id {
-            activeTabID = tabs.indices.contains(index) ? tabs[index].id : tabs.last?.id
+            let fallback = pane.flatMap { groupActive.indices.contains($0) ? groupActive[$0] : nil }
+            activeTabID = fallback ?? groupActive.first ?? tabs.last?.id
+        }
+        if groups.isEmpty, let activeTabID {
+            groups = [[activeTabID]]
+            groupActive = [activeTabID]
         }
     }
 
@@ -179,8 +193,133 @@ final class TabsModel: ObservableObject {
 
     private func append(_ tab: TerminalTab) {
         tabs.append(tab)
-        activeTabID = tab.id
+        show(tab.id)
     }
+
+    // MARK: - Panes
+
+    /// Each pane owns its own tabs, the way VS Code's editor groups do.
+    ///
+    /// One shared list of tabs across panes was the wrong model: a split is
+    /// nearly always a session with the terminal it is driving beside it, and
+    /// clicking any third tab tore that pair apart. Tabs belong to a pane, so
+    /// picking one changes that pane and leaves the other alone.
+    ///
+    /// A tab is never in two panes at once — the terminal is a single view, and
+    /// showing it twice would mean moving it back and forth between them.
+    func show(_ id: String) {
+        if let group = group(of: id) {
+            groupActive[group] = id
+        } else if groups.isEmpty {
+            groups = [[id]]
+            groupActive = [id]
+        } else {
+            let pane = min(focusedPane, groups.count - 1)
+            groups[pane].append(id)
+            groupActive[pane] = id
+        }
+        activeTabID = id
+    }
+
+    /// Drop a tab onto a pane: it moves there, out of the pane it came from.
+    func show(_ id: String, inPane index: Int) {
+        guard groups.indices.contains(index) else { return show(id) }
+        if group(of: id) == index { return activeTabID = id }
+        detach(id)
+        // The pane it came from may have folded away when it emptied.
+        let target = min(index, groups.count - 1)
+        groups[target].append(id)
+        groupActive[target] = id
+        activeTabID = id
+    }
+
+    /// Put this tab in a pane of its own, beside the others.
+    func splitOff(_ id: String, at index: Int? = nil) {
+        guard groups.count < Self.maxPanes else {
+            return show(id, inPane: index ?? focusedPane)
+        }
+        let from = group(of: id)
+        // A pane holding one tab has nothing to give away.
+        if let from, groups[from].count == 1 { return activeTabID = id }
+        detach(id)
+        let at = min(index ?? groups.count, groups.count)
+        groups.insert([id], at: at)
+        groupActive.insert(id, at: at)
+        activeTabID = id
+    }
+
+    /// This pane takes the whole window again. Nothing closes: the tabs of the
+    /// other panes move into this one, still running, still open.
+    func maximisePane(_ index: Int) {
+        guard groups.indices.contains(index) else { return }
+        let keep = groupActive[index]
+        var merged: [String] = []
+        for (pane, tabs) in groups.enumerated() {
+            merged += pane == index ? tabs : tabs.filter { !merged.contains($0) }
+        }
+        groups = [merged]
+        groupActive = [keep]
+        activeTabID = keep
+    }
+
+    /// Closes the pane, not the work in it: its tabs join the pane next door.
+    func closePane(_ index: Int) {
+        guard groups.count > 1, groups.indices.contains(index) else { return }
+        let orphans = groups[index]
+        let neighbour = index == 0 ? 1 : index - 1
+        groups[neighbour] += orphans
+        let survivor = groupActive[neighbour]
+        groups.remove(at: index)
+        groupActive.remove(at: index)
+        activeTabID = survivor
+    }
+
+    var canSplit: Bool {
+        groups.count < Self.maxPanes && groups.contains { $0.count > 1 }
+    }
+
+    /// The tab each pane is showing, left to right.
+    var panes: [String] { groupActive }
+
+    /// What to draw. Falls back to the active tab so a pane list that somehow
+    /// went empty shows the session rather than a blank window.
+    var visiblePanes: [String] {
+        groupActive.isEmpty ? [activeTabID].compactMap { $0 } : groupActive
+    }
+
+    /// The tabs of one pane, in the order they were opened.
+    func tabs(inPane index: Int) -> [TerminalTab] {
+        guard groups.indices.contains(index) else { return [] }
+        return groups[index].compactMap { id in tabs.first { $0.id == id } }
+    }
+
+    var focusedPane: Int {
+        activeTabID.flatMap { group(of: $0) } ?? 0
+    }
+
+    func group(of id: String) -> Int? {
+        groups.firstIndex { $0.contains(id) }
+    }
+
+    func tab(withID id: String) -> TerminalTab? {
+        tabs.first { $0.id == id }
+    }
+
+    /// Takes a tab out of its pane, folding the pane away if it was the last
+    /// one in it.
+    private func detach(_ id: String) {
+        guard let from = group(of: id) else { return }
+        groups[from].removeAll { $0 == id }
+        if groups[from].isEmpty, groups.count > 1 {
+            groups.remove(at: from)
+            groupActive.remove(at: from)
+        } else if groupActive[from] == id {
+            groupActive[from] = groups[from].last ?? id
+        }
+    }
+
+    /// Three is where a terminal stops being readable on a laptop screen.
+    static let maxPanes = 3
 
     private static func tabID(session: String, profile: String?) -> String {
         profile.map { "\(session)#\($0)" } ?? session
@@ -190,7 +329,7 @@ final class TabsModel: ObservableObject {
         profile.split(separator: "@").first.map(String.init) ?? profile
     }
 
-    private static func folderName(_ path: String) -> String {
+    static func folderName(_ path: String) -> String {
         path.split(separator: "/").last.map(String.init) ?? path
     }
 }
