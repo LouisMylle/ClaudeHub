@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>ClaudeHub</string>
     <key>CFBundleIdentifier</key>
-    <string>be.optimize.claudehub</string>
+    <string>be.optimize.claudehub.devtest</string>
     <key>CFBundleName</key>
     <string>ClaudeHub</string>
     <key>CFBundleDisplayName</key>

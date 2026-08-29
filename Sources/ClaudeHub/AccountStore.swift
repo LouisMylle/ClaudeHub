@@ -44,6 +44,7 @@ final class AccountStore: ObservableObject {
     func setActive(_ profile: String?) {
         TokenStore.activeProfile = profile
         activeProfile = TokenStore.activeProfile
+        NotificationCenter.default.post(name: .activeAccountChanged, object: nil)
     }
 
     private var inFlight = false

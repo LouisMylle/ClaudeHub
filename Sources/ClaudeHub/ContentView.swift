@@ -84,6 +84,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .deleteSelectedSession)) { _ in
             requestDeletionOfSelection()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .activeAccountChanged)) { _ in
+            usage.accountChanged()
+        }
         .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) { confirmDeletion() }
                 .keyboardShortcut(.defaultAction)
@@ -287,6 +290,9 @@ struct ContentView: View {
         Button("New Session in This Folder") { newSession(in: session.cwd) }
         Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
         Divider()
+        if Self.vsCodeURL != nil {
+            Button("Open in VS Code") { openInVSCode(session.cwd) }
+        }
         Button("Open in Terminal.app") { openInTerminalApp(session) }
         Button("Reveal Folder in Finder") {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: session.cwd)
@@ -319,6 +325,9 @@ struct ContentView: View {
         Button("New Session in This Project") { newSession(in: project.path) }
         Button("New Terminal in This Project") { tabs.openNewTab(cwd: project.path) }
         Divider()
+        if Self.vsCodeURL != nil {
+            Button("Open in VS Code") { openInVSCode(project.path) }
+        }
         Button("Reveal in Finder") {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
         }
@@ -382,6 +391,17 @@ struct ContentView: View {
             : "\(failed.count) sessions could not be moved to the Trash. Check the files' permissions."
     }
 
+    /// nil when VS Code is not installed, which hides the menu item.
+    private static let vsCodeURL: URL? =
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode")
+
+    private func openInVSCode(_ path: String) {
+        guard let application = Self.vsCodeURL else { return }
+        NSWorkspace.shared.open([URL(fileURLWithPath: path)],
+                                withApplicationAt: application,
+                                configuration: NSWorkspace.OpenConfiguration())
+    }
+
     private func openInTerminalApp(_ session: ClaudeSession) {
         let command = session.resumeCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -416,6 +436,7 @@ private struct TabBarView: View {
                             tab: tab,
                             isActive: tab.id == tabs.activeTabID,
                             activity: terminalManager.activity(of: tab.id),
+                            accountLabel: accounts.effectiveLabel,
                             activate: { tabs.activeTabID = tab.id },
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
@@ -461,6 +482,7 @@ private struct TabChip: View {
     let tab: TerminalTab
     let isActive: Bool
     let activity: TerminalActivity
+    let accountLabel: String
     let activate: () -> Void
     let restart: () -> Void
     let close: () -> Void
@@ -507,6 +529,15 @@ private struct TabChip: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: activate)
+        .contextMenu {
+            // A running process keeps the account it launched with, but a
+            // resumed tab can simply be run again — same conversation, now on
+            // whichever account is active.
+            Button(tab.resumeSessionID == nil
+                   ? "Restart Tab"
+                   : "Restart as \(accountLabel)") { restart() }
+            Button("Close Tab") { close() }
+        }
     }
 }
 

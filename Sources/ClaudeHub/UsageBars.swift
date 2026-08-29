@@ -7,27 +7,43 @@ struct UsageBars: View {
     private static let barWidth: CGFloat = 90
 
     var body: some View {
-        // Both windows count down; the raw text is only a fallback for a
-        // reset the panel phrased in some way we could not turn into a date.
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            VStack(spacing: 5) {
-                row("5h", usage.session, at: context.date)
-                row("Week", usage.week, at: context.date)
+        HStack(spacing: 6) {
+            // Both windows count down; the raw text is only a fallback for a
+            // reset the panel phrased in some way we could not turn into a date.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                VStack(spacing: 5) {
+                    row("5h", usage.session, at: context.date)
+                    row("Week", usage.week, at: context.date)
+                }
             }
+            Button {
+                usage.refresh()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .rotationEffect(.degrees(usage.isProbing ? 360 : 0))
+                    .animation(usage.isProbing
+                               ? .linear(duration: 1).repeatForever(autoreverses: false)
+                               : .default,
+                               value: usage.isProbing)
+            }
+            .buttonStyle(.borderless)
+            .disabled(usage.isProbing)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .contentShape(Rectangle())
-        .onTapGesture { usage.refresh() }
         .help(helpText)
     }
 
     private var helpText: String {
         if let error = usage.errorMessage { return error }
         guard let updated = usage.lastUpdated else {
-            return usage.isProbing ? "Reading /usage…" : "Click to read your limits"
+            return usage.isProbing ? "Reading /usage…" : "Click ↻ to read your limits"
         }
-        return "Limits as of \(updated.formatted(date: .omitted, time: .shortened)) — click to refresh"
+        let seconds = Int(Date().timeIntervalSince(updated))
+        let ago = seconds < 60 ? "just now" : "\(seconds / 60) min ago"
+        return "Updated \(ago), and every minute — click ↻ for now"
     }
 
     @ViewBuilder

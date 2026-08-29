@@ -6,6 +6,8 @@ extension Notification.Name {
     static let newClaudeSessionInFolder = Notification.Name("ClaudeHub.newSessionInFolder")
     /// Menu → "Delete Session": acted on by the window holding the selection.
     static let deleteSelectedSession = Notification.Name("ClaudeHub.deleteSelectedSession")
+    /// The account sessions run as changed, so the limits belong to someone else now.
+    static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
