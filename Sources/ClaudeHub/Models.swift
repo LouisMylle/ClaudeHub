@@ -4,7 +4,9 @@ struct ClaudeSession: Identifiable, Hashable {
     let id: String          // session UUID (jsonl filename)
     let title: String
     let cwd: String
-    let lastModified: Date
+    /// When Claude last answered here — read from the transcript, not from
+    /// the file's mtime, which every open, resume or background pass bumps.
+    let lastActivity: Date
     let fileURL: URL
 
     var resumeCommand: String {
@@ -34,5 +36,5 @@ struct ClaudeProject: Identifiable, Hashable {
     let path: String
     var sessions: [ClaudeSession]
 
-    var lastModified: Date { sessions.map(\.lastModified).max() ?? .distantPast }
+    var lastActivity: Date { sessions.map(\.lastActivity).max() ?? .distantPast }
 }
