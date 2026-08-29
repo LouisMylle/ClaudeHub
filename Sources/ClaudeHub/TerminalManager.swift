@@ -487,9 +487,18 @@ final class TerminalManager: NSObject, ObservableObject {
         var lines: [String] = []
         for row in 0..<terminal.rows {
             guard let line = terminal.getLine(row: row) else { continue }
-            lines.append(line.translateToString(trimRight: true))
+            lines.append(readable(line.translateToString(trimRight: true)))
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// A cell that was never written comes back as NUL, not as a space —
+    /// SwiftTerm hands you `Character(Unicode.Scalar(0))` for an empty cell.
+    /// On screen that gap is a space, and everything that reads the screen
+    /// means the space: a prompt read as text otherwise loses every gap
+    /// between words, and typing it back sends NULs the terminal drops.
+    private static func readable(_ text: String) -> String {
+        text.replacingOccurrences(of: "\0", with: " ")
     }
 
     /// The login URL a `claude auth` tab prints, rejoined.
@@ -515,6 +524,33 @@ final class TerminalManager: NSObject, ObservableObject {
             next += 1
         }
         return url.count > 30 ? url : nil
+    }
+
+    // MARK: - Find
+
+    /// Searches the tab's scrollback, selects the match and scrolls to it.
+    /// Returns "3 of 12" for the field's counter.
+    @discardableResult
+    func find(_ term: String, in tabID: String, forward: Bool = true) -> (index: Int, total: Int) {
+        guard let view = terminals[tabID], !term.isEmpty else { return (0, 0) }
+        if forward {
+            view.findNext(term)
+        } else {
+            view.findPrevious(term)
+        }
+        return view.searchMatchSummary(term)
+    }
+
+    /// Typing in the field searches from the top again, rather than walking
+    /// forward from wherever the last keystroke happened to land.
+    @discardableResult
+    func findFromStart(_ term: String, in tabID: String) -> (index: Int, total: Int) {
+        terminals[tabID]?.clearSearch()
+        return find(term, in: tabID, forward: true)
+    }
+
+    func clearFind(in tabID: String) {
+        terminals[tabID]?.clearSearch()
     }
 
     // MARK: - Slash commands
@@ -580,7 +616,7 @@ final class TerminalManager: NSObject, ObservableObject {
             }
             // Not trimmed: at a wrap, a trailing space is content, and dropping
             // it is how "hello world" comes back as "helloworld".
-            rows.append((line.translateToString(trimRight: false), line.isWrapped))
+            rows.append((readable(line.translateToString(trimRight: false)), line.isWrapped))
         }
 
         guard let start = rows.indices.reversed().first(where: { isPromptRow(rows[$0].text) }),

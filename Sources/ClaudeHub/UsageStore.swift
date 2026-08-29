@@ -501,7 +501,9 @@ final class UsageStore: ObservableObject {
         var lines: [String] = []
         for row in 0..<terminal.rows {
             guard let line = terminal.getLine(row: row) else { continue }
-            lines.append(line.translateToString(trimRight: true))
+            // An unwritten cell is NUL, and on screen it is a space.
+            lines.append(line.translateToString(trimRight: true)
+                .replacingOccurrences(of: "\0", with: " "))
         }
         return lines.joined(separator: "\n")
     }

@@ -50,6 +50,29 @@ struct ContentView: View {
         return terminalManager.activity(of: tab.id)
     }
 
+    private func step(forward: Bool) {
+        guard let id = tabs.activeTabID, !findTerm.isEmpty else { return }
+        findShown = true
+        findMatches = terminalManager.find(findTerm, in: id, forward: forward)
+    }
+
+    private func searchFromStart() {
+        guard let id = tabs.activeTabID else { return }
+        guard !findTerm.isEmpty else {
+            terminalManager.clearFind(in: id)
+            findMatches = (0, 0)
+            return
+        }
+        findMatches = terminalManager.findFromStart(findTerm, in: id)
+    }
+
+    private func closeFind() {
+        if let id = tabs.activeTabID { terminalManager.clearFind(in: id) }
+        findShown = false
+        findTerm = ""
+        findMatches = (0, 0)
+    }
+
     /// The limits of the account the tab you are looking at is running as.
     ///
     /// Not the active account: a session keeps the account it started with, so
@@ -92,6 +115,27 @@ struct ContentView: View {
     }
 
     var body: some View {
+        // Split in two on purpose: one chain carrying every observer defeats
+        // the type-checker, and the error it gives says nothing about why.
+        window
+        .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive) { confirmDeletion() }
+                .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) { pendingDeletion = [] }
+        } message: {
+            Text(deleteMessage)
+        }
+        .alert("Could not delete", isPresented: Binding(
+            get: { deleteError != nil },
+            set: { if !$0 { deleteError = nil } }
+        )) {
+            Button("OK", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "")
+        }
+    }
+
+    private var window: some View {
         NavigationSplitView {
             sidebar
         } detail: {
@@ -135,10 +179,13 @@ struct ContentView: View {
             guard let id, let session = session(withID: id) else { return }
             tabs.openSession(session)
         }
-        .onChange(of: tabs.activeTabID) { _, _ in
+        .onChange(of: tabs.activeTabID) { previous, _ in
             // Keep the sidebar in sync with the active tab (nil for fresh-session tabs)
             selectedSessionID = tabs.activeTab?.sessionID
             syncVisibleTabs()
+            // A search belongs to the terminal it was run in.
+            if let previous { terminalManager.clearFind(in: previous) }
+            findMatches = (0, 0)
         }
         .onChange(of: tabs.panes) { _, panes in
             syncVisibleTabs()
@@ -154,6 +201,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showMCPManager)) { _ in
             showMCPManager = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .findInTab)) { _ in
+            findShown = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .findNextMatch)) { _ in
+            step(forward: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .findPreviousMatch)) { _ in
+            step(forward: false)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .splitActiveTab)) { _ in
             // ⌘\ puts the next tab along beside this one, which is what you
             // want it for: a session and the terminal you are running against
@@ -167,21 +223,6 @@ struct ContentView: View {
             // resumes where it was.
             terminalManager.restartConversations(tabs.tabs)
             usage.accountChanged()
-        }
-        .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
-            Button("Move to Trash", role: .destructive) { confirmDeletion() }
-                .keyboardShortcut(.defaultAction)
-            Button("Cancel", role: .cancel) { pendingDeletion = [] }
-        } message: {
-            Text(deleteMessage)
-        }
-        .alert("Could not delete", isPresented: Binding(
-            get: { deleteError != nil },
-            set: { if !$0 { deleteError = nil } }
-        )) {
-            Button("OK", role: .cancel) { deleteError = nil }
-        } message: {
-            Text(deleteError ?? "")
         }
     }
 
@@ -438,6 +479,9 @@ struct ContentView: View {
     /// there rather than instead of it.
     @State private var splitTargeted = false
     @State private var paneFractions: [Double] = []
+    @State private var findTerm = ""
+    @State private var findShown = false
+    @State private var findMatches = (index: 0, total: 0)
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -469,6 +513,14 @@ struct ContentView: View {
                 Divider()
                 if tab.isCommand, let link = terminalManager.signInURL(in: tab.id) {
                     SignInLinkBar(url: link)
+                    Divider()
+                }
+                if findShown {
+                    FindBar(term: $findTerm,
+                            matches: findMatches,
+                            search: searchFromStart,
+                            step: step,
+                            close: closeFind)
                     Divider()
                 }
                 paneStack
@@ -802,6 +854,51 @@ private struct TabBarView: View {
         }
         .padding(.leading, 8)
         .background(.bar)
+    }
+}
+
+/// Find in the tab you are looking at — the scrollback included, since that is
+/// where the answer you are looking for usually is.
+private struct FindBar: View {
+    @Binding var term: String
+    let matches: (index: Int, total: Int)
+    let search: () -> Void
+    let step: (Bool) -> Void
+    let close: () -> Void
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("Find in this session", text: $term)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($focused)
+                .onChange(of: term) { _, _ in search() }
+                .onSubmit { step(true) }
+            if !term.isEmpty {
+                Text(matches.total == 0 ? "none" : "\(matches.index) of \(matches.total)")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(matches.total == 0 ? Color.orange : Color.secondary)
+            }
+            Button { step(false) } label: { Image(systemName: "chevron.up") }
+                .help("Previous match (⇧⌘G)")
+            Button { step(true) } label: { Image(systemName: "chevron.down") }
+                .help("Next match (⌘G)")
+            Button(action: close) { Image(systemName: "xmark") }
+                .help("Close (esc)")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .font(.system(size: 11, weight: .medium))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .onAppear { focused = true }
+        .onExitCommand(perform: close)
     }
 }
 

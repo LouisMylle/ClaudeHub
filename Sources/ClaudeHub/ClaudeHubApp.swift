@@ -8,6 +8,10 @@ extension Notification.Name {
     static let deleteSelectedSession = Notification.Name("ClaudeHub.deleteSelectedSession")
     static let showMCPManager = Notification.Name("ClaudeHub.showMCPManager")
     static let splitActiveTab = Notification.Name("ClaudeHub.splitActiveTab")
+    /// ⌘F, ⌘G, ⇧⌘G — find in the tab you are looking at.
+    static let findInTab = Notification.Name("ClaudeHub.findInTab")
+    static let findNextMatch = Notification.Name("ClaudeHub.findNextMatch")
+    static let findPreviousMatch = Notification.Name("ClaudeHub.findPreviousMatch")
     /// The account sessions run as changed, so the limits belong to someone else now.
     static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
 }
@@ -56,6 +60,19 @@ struct ClaudeHubApp: App {
                 NewItemCommands(store: store, tabs: tabs)
             }
             CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Find…") {
+                    NotificationCenter.default.post(name: .findInTab, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .findNextMatch, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .findPreviousMatch, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
                 Divider()
                 Button("MCP Servers…") {
                     NotificationCenter.default.post(name: .showMCPManager, object: nil)
