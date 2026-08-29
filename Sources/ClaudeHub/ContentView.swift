@@ -254,7 +254,14 @@ struct ContentView: View {
                     ForEach(git.dirtyRepos) { repo in
                         RepoRow(
                             repo: repo,
+                            newSession: {
+                                tabs.openNewSession(cwd: repo.root)
+                                store.refreshSoon()
+                            },
                             openInEditor: { openInVSCode(repo.root) },
+                            openFile: { path in
+                                openInVSCode((repo.root as NSString).appendingPathComponent(path))
+                            },
                             showDiff: {
                                 tabs.openScript(
                                     "git -c color.ui=always status --short; echo; git -c color.ui=always diff HEAD",
@@ -1146,7 +1153,12 @@ private struct SignInLinkBar: View {
 /// ClaudeHub to look at it properly.
 private struct RepoRow: View {
     let repo: RepoStatus
+    /// Seeing what is lying around and starting a session about it are the same
+    /// thought, so they are one click apart.
+    let newSession: () -> Void
     let openInEditor: () -> Void
+    /// A file is worth opening on its own; the repository is the coarse answer.
+    let openFile: (String) -> Void
     let showDiff: () -> Void
     let reveal: () -> Void
     let canOpenInEditor: Bool
@@ -1169,20 +1181,28 @@ private struct RepoRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                            .help(file.path)
                     }
+                    .contentShape(Rectangle())
+                    .clickable()
+                    .onTapGesture { openFile(file.path) }
+                    .help("\(file.path)\nClick to open this file in VS Code")
                 }
                 if repo.files.count > Self.shown {
                     Text("+ \(repo.files.count - Self.shown) more")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
+                // Three fit the sidebar; the Finder is a right-click away,
+                // where a thing you reach for once a week belongs.
                 HStack(spacing: 6) {
+                    Button("Session", action: newSession)
+                        .help("New Claude session in \(repo.name)")
+                    Button("Diff", action: showDiff)
+                        .help("git status and git diff in a terminal tab")
                     if canOpenInEditor {
-                        Button("Open in VS Code", action: openInEditor)
+                        Button("VS Code", action: openInEditor)
+                            .help("Open \(repo.name) in VS Code")
                     }
-                    Button("Diff in a Tab", action: showDiff)
-                    Button("Finder", action: reveal)
                 }
                 .controlSize(.small)
                 .buttonStyle(.bordered)
@@ -1200,10 +1220,10 @@ private struct RepoRow: View {
                     Spacer(minLength: 4)
                     Text("\(repo.pending)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(Color.pending)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.orange.opacity(0.16), in: Capsule())
+                        .background(Color.pending.opacity(0.14), in: Capsule())
                 }
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.triangle.branch")
@@ -1215,13 +1235,20 @@ private struct RepoRow: View {
                     // An unpushed branch is the state you want to notice before
                     // you close the laptop, so it does not read as an aside.
                     Text(repo.syncLabel)
-                        .foregroundStyle(repo.isUnpushed ? Color.orange.opacity(0.9) : Color.secondary)
+                        .foregroundStyle(repo.isUnpushed ? Color.pending : Color.secondary)
                 }
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
             }
             .clickable()
             .help(repo.root)
+            .contextMenu {
+                Button("New Session in \(repo.name)", action: newSession)
+                Button("Diff in a Tab", action: showDiff)
+                if canOpenInEditor { Button("Open in VS Code", action: openInEditor) }
+                Divider()
+                Button("Reveal in Finder", action: reveal)
+            }
         }
     }
 
@@ -1230,8 +1257,8 @@ private struct RepoRow: View {
         case "A": return .green
         case "D": return .red
         case "?": return .secondary
-        case "U": return .orange
-        default: return .orange
+        case "U": return .pending
+        default: return .pending
         }
     }
 }
@@ -1316,10 +1343,10 @@ private struct ProjectHeader<MenuContent: View>: View {
                     if pending > 0 {
                         Text("\(pending)")
                             .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(Color.orange)
+                            .foregroundStyle(Color.pending)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.16), in: Capsule())
+                            .background(Color.pending.opacity(0.14), in: Capsule())
                     }
                 }
                 .foregroundStyle(.tertiary)

@@ -29,3 +29,17 @@ extension View {
     /// Marks a view as clickable to the pointer.
     func clickable() -> some View { modifier(PointingHand()) }
 }
+
+extension Color {
+    /// Uncommitted work, and the states that go with it.
+    ///
+    /// Full-strength orange is a warning colour, and this is not a warning —
+    /// it is a count. On the dark sidebar it wants to be lighter than the
+    /// system orange to read as a tint rather than an alarm; on a light one it
+    /// has to go the other way to stay legible at all.
+    static let pending = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedRed: 0.98, green: 0.80, blue: 0.52, alpha: 1)
+            : NSColor(calibratedRed: 0.72, green: 0.46, blue: 0.04, alpha: 1)
+    })
+}
