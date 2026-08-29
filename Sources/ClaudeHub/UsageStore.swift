@@ -128,10 +128,11 @@ final class UsageStore: ObservableObject {
         return account ?? "the signed-in account"
     }
 
+    /// Reads the signed-in account's limits. Every saved account's numbers come
+    /// from the API instead, polled by `AccountStore` — one place, one request,
+    /// and no chance of the footer and the account menu disagreeing.
     func refresh() {
-        guard !isProbing else { return }
-        // Asked and answered; a switch or the ↻ button clears this.
-        guard !limitsUnavailable else { return }
+        guard !probeBusy else { return }
         guard let cwd = folder() else {
             // The first scan may not have landed yet; keep trying briefly
             // rather than going quiet until the next tick.
@@ -142,61 +143,7 @@ final class UsageStore: ObservableObject {
             }
             return
         }
-        // Numbers read on the wrong credential are worse than no numbers: they
-        // are another account's limits under this account's name. If the active
-        // account's token is not in hand yet, wait for it rather than starting
-        // a session that would quietly run as whoever is signed in.
-        if let profile = TokenStore.activeProfile,
-           TokenStore.cachedToken(for: profile) == nil {
-            guard retries < 15 else {
-                return fail(TokenStore.blockedReason(for: profile)
-                    ?? "Waiting for \(profile)'s token to be readable.")
-            }
-            retries += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                self?.refresh()
-            }
-            return
-        }
         retries = 0
-        isProbing = true
-
-        // A token account is not told its limits by the CLI, but the API states
-        // them in the headers of any request. Ask there first; the hidden
-        // session is the fallback, not the other way round.
-        if let profile = TokenStore.activeProfile,
-           let token = TokenStore.cachedToken(for: profile) {
-            // The reading is a real request, small as it is, so it is not made
-            // on a timer behind a window nobody is looking at.
-            let haveNumbers = session != nil || week != nil
-            if !forceNextPoll, haveNumbers,
-               !NSApplication.shared.isActive
-                   || Date().timeIntervalSince(lastAPIPoll ?? .distantPast) < apiInterval {
-                isProbing = false
-                return
-            }
-            forceNextPoll = false
-            lastAPIPoll = Date()
-            let era = generation
-            TokenCheck.limits(token: token) { [weak self] headers in
-                guard let self else { return }
-                self.isProbing = false
-                guard self.generation == era else { return }
-                let windows = Self.windows(from: headers)
-                guard windows.session != nil || windows.week != nil else {
-                    return self.startTerminalProbe(in: cwd)
-                }
-                self.session = windows.session
-                self.week = windows.week
-                self.lastUpdated = Date()
-                self.measuredAccount = profile
-                self.errorMessage = nil
-                self.limitsUnavailable = false
-                self.isProbing = false
-            }
-            return
-        }
-
         startTerminalProbe(in: cwd)
     }
 
@@ -204,7 +151,6 @@ final class UsageStore: ObservableObject {
     /// the active one. Reading them is free; the hidden session is not, which
     /// is why it is throttled and stops behind an idle window.
     func refreshSignedInLimits() {
-        guard TokenStore.activeProfile != nil else { return }    // refresh() covers the rest
         guard !probeBusy, NSApplication.shared.isActive else { return }
         guard Date().timeIntervalSince(lastProbeAt ?? .distantPast) >= probeInterval else { return }
         guard let cwd = folder() else { return }
@@ -544,8 +490,9 @@ final class UsageStore: ObservableObject {
     func refreshByHand() {
         limitsUnavailable = false
         errorMessage = nil
+        signedInError = nil
         retries = 0
-        forceNextPoll = true
+        lastProbeAt = nil
         refresh()
     }
 

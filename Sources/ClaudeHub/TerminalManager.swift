@@ -45,6 +45,10 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Sessions that answered while you were elsewhere. Cleared by looking at
     /// them, which is the only thing that should clear it.
     @Published private(set) var unread: Set<String> = []
+    /// Tabs whose account has run out, with what the session said about it.
+    /// The limit belongs to the account that tab started with, which is not
+    /// necessarily the one you are about to start a session on.
+    @Published private(set) var limitNotices: [String: String] = [:]
     private var finishedAt: [String: Date] = [:]
     /// The tabs on screen right now, so an answer you watched arrive is not
     /// then reported as something you missed.
@@ -420,6 +424,11 @@ final class TerminalManager: NSObject, ObservableObject {
                 if !watched { finished.append(id) }
             }
             next[id] = state
+
+            // "You've hit your session limit · resets 2:40am" — the one message
+            // that explains a session that has gone quiet and will not answer.
+            let notice = Self.limitNotice(in: Self.visibleText(of: view))
+            if limitNotices[id] != notice { limitNotices[id] = notice }
         }
         if next != activity { activity = next }
         if !finished.isEmpty {
@@ -446,6 +455,24 @@ final class TerminalManager: NSObject, ObservableObject {
             view.send(txt: draft)
             pendingDrafts[id] = nil
         }
+    }
+
+    /// What the session says about being out of quota, in its own words.
+    private static func limitNotice(in screen: String) -> String? {
+        let markers = ["hit your session limit", "hit your usage limit",
+                       "hit your weekly limit", "usage limit reached"]
+        guard let line = screen.split(separator: "\n").last(where: { line in
+            markers.contains { line.contains($0) }
+        }) else { return nil }
+        return line.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// "resets 2:40am" out of the whole sentence, for a badge with no room.
+    static func resetTime(in notice: String) -> String? {
+        guard let range = notice.range(of: "resets ", options: .caseInsensitive) else { return nil }
+        let rest = notice[range.upperBound...]
+        let time = rest.prefix { !$0.isWhitespace }
+        return time.isEmpty ? nil : String(time)
     }
 
     private static func classify(_ screen: String) -> TerminalActivity {

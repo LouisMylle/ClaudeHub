@@ -50,6 +50,29 @@ struct ContentView: View {
         return terminalManager.activity(of: tab.id)
     }
 
+    /// The limits of the account the tab you are looking at is running as.
+    ///
+    /// Not the active account: a session keeps the account it started with, so
+    /// after switching you can be reading a tab on one account while new
+    /// sessions would start on another. Showing the second account's bars over
+    /// the first account's conversation is how a session that has run out sits
+    /// under a bar reading 1%.
+    private var usageReadout: UsageReadout {
+        if let account = tabs.activeTab.flatMap({ terminalManager.profile(of: $0) }) {
+            let status = accounts.status(of: account)
+            return UsageReadout(session: status.session,
+                                week: status.week,
+                                account: account,
+                                problem: status.problem ?? status.unverified,
+                                isBusy: status.isChecking)
+        }
+        return UsageReadout(session: usage.signedInSession,
+                            week: usage.signedInWeek,
+                            account: accounts.current?.email ?? "the signed-in account",
+                            problem: usage.signedInError,
+                            isBusy: usage.isProbing)
+    }
+
     /// What is on screen, and therefore what counts as read. Only while the
     /// app is in front: a session that finished behind another window is
     /// precisely the one you need told about.
@@ -177,7 +200,7 @@ struct ContentView: View {
                 } header: {
                     ProjectHeader(
                         project: project,
-                        repo: git.status(forProjectAt: project.path),
+                        repos: git.repos(forProjectAt: project.path),
                         newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
                         menu: { projectMenu(project) }
                     )
@@ -213,7 +236,10 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
-                UsageBars(usage: usage)
+                UsageBars(readout: usageReadout, refresh: {
+                    usage.refreshByHand()
+                    accounts.refreshLimits(force: true)
+                })
                 HStack {
                     AccountChip(accounts: accounts, tabs: tabs, usage: usage)
                 Spacer()
@@ -690,6 +716,7 @@ private struct TabStrip: View {
                             activeAccount: accounts.activeProfile,
                             fellBackFrom: terminalManager.fallbackAccount(of: tab.id),
                             pending: terminalManager.pendingSwitch(of: tab.id),
+                            limitNotice: terminalManager.limitNotices[tab.id],
                             activate: { tabs.show(tab.id) },
                             splitOff: { tabs.splitOff(tab.id) },
                             canSplit: tabs.canSplit,
@@ -836,6 +863,8 @@ private struct TabChip: View {
     let fellBackFrom: String?
     /// Set when the tab could not move to the new account yet, and why.
     let pending: (account: String, waitingOnPaste: Bool)?
+    /// Set when this tab's account has run out, in the session's own words.
+    let limitNotice: String?
     let activate: () -> Void
     let splitOff: () -> Void
     let canSplit: Bool
@@ -923,7 +952,20 @@ private struct TabChip: View {
                 .lineLimit(1)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)
-            if let pending {
+            if let limitNotice {
+                Text(TerminalManager.resetTime(in: limitNotice).map { "limit · \($0)" } ?? "limit")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.red.opacity(0.22), in: Capsule())
+                    .help("""
+                        \(limitNotice)
+
+                        This is the limit of \(account ?? "the signed-in account"), the \
+                        account this tab started on. Another account may still have room \
+                        — the account menu compares them.
+                        """)
+            } else if let pending {
                 Text("→ \(TabsModel.shortLabel(pending.account))")
                     .font(.system(size: 9, weight: .semibold))
                     .padding(.horizontal, 4)
@@ -1128,11 +1170,27 @@ private struct SessionRow: View {
 
 private struct ProjectHeader<MenuContent: View>: View {
     let project: ClaudeProject
-    /// The repository this project sits in, when it sits in one.
-    let repo: RepoStatus?
+    /// The repositories this project folder covers — often several, since a
+    /// folder you work in tends to hold a handful of them.
+    let repos: [RepoStatus]
     let newSession: () -> Void
     @ViewBuilder let menu: () -> MenuContent
     @State private var isHovering = false
+
+    private var pending: Int { repos.reduce(0) { $0 + $1.pending } }
+
+    /// One repository speaks for itself; several are counted, because there is
+    /// no single branch to name.
+    private var label: String {
+        repos.count == 1 ? repos[0].branch : "\(repos.count) repos"
+    }
+
+    private var tooltip: String {
+        repos.map { repo in
+            let state = repo.pending > 0 ? "\(repo.pending) uncommitted" : "clean"
+            return "\(repo.name) · \(repo.branch) · \(state) · \(repo.syncLabel)"
+        }.joined(separator: "\n")
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1150,16 +1208,16 @@ private struct ProjectHeader<MenuContent: View>: View {
                 .padding(.vertical, 1)
                 .background(Color.primary.opacity(0.08), in: Capsule())
             Spacer(minLength: 6)
-            if let repo {
+            if !repos.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 9, weight: .medium))
-                    Text(repo.branch)
+                    Text(label)
                         .font(.system(size: 10))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if repo.pending > 0 {
-                        Text("\(repo.pending)")
+                    if pending > 0 {
+                        Text("\(pending)")
                             .font(.system(size: 10, weight: .semibold).monospacedDigit())
                             .foregroundStyle(Color.orange)
                             .padding(.horizontal, 5)
@@ -1169,9 +1227,7 @@ private struct ProjectHeader<MenuContent: View>: View {
                 }
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: 150, alignment: .trailing)
-                .help(repo.pending > 0
-                      ? "\(repo.pending) uncommitted in \(repo.name) · \(repo.syncLabel)"
-                      : "\(repo.name) is clean · \(repo.syncLabel)")
+                .help(tooltip)
             }
             Button(action: newSession) {
                 Image(systemName: "plus.circle")

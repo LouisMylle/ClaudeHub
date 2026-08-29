@@ -55,8 +55,9 @@ final class GitStore: ObservableObject {
     @Published private(set) var repos: [RepoStatus] = []
 
     private var roots: [String] = []
-    /// cwd → repository root, so the walk up the tree happens once per folder.
-    private var rootCache: [String: String?] = [:]
+    /// Project folder → the repositories in it, so the filesystem is walked
+    /// once per folder and never on the main thread.
+    private var rootCache: [String: [String]] = [:]
     private var timer: Timer?
     private var scanning = false
     private let queue = DispatchQueue(label: "be.optimize.claudehub.git", qos: .utility)
@@ -72,9 +73,12 @@ final class GitStore: ObservableObject {
     /// The repositories worth watching, from the folders the sidebar lists.
     var dirtyRepos: [RepoStatus] { repos.filter(\.isDirty) }
 
-    func status(forProjectAt path: String) -> RepoStatus? {
-        guard let root = rootCache[path] ?? nil else { return nil }
-        return repos.first { $0.root == root }
+    /// The repositories belonging to one project folder. A folder in the
+    /// sidebar is often a container — `fytolog` holds five repos, `PERSOONLIJK`
+    /// holds this one — so this is a list, not a single answer.
+    func repos(forProjectAt path: String) -> [RepoStatus] {
+        let roots = rootCache[path] ?? []
+        return repos.filter { roots.contains($0.root) }
     }
 
     /// Refreshed on a slow timer, and only while the window is in front: a
@@ -89,16 +93,20 @@ final class GitStore: ObservableObject {
 
     /// Called with the sidebar's project folders whenever they are rescanned.
     func track(projects paths: [String]) {
-        let resolved = paths.compactMap { path -> String? in
-            if let cached = rootCache[path] { return cached }
-            let root = Self.repositoryRoot(of: path)
-            rootCache[path] = root
-            return root
+        let unknown = paths.filter { rootCache[$0] == nil }
+        guard !unknown.isEmpty else { return scan() }
+
+        queue.async {
+            var found: [String: [String]] = [:]
+            for path in unknown { found[path] = Self.repositories(in: path) }
+            DispatchQueue.main.async {
+                for (path, roots) in found { self.rootCache[path] = roots }
+                let unique = Array(Set(self.rootCache.values.flatMap { $0 })).sorted()
+                guard unique != self.roots else { return }
+                self.roots = unique
+                self.scan()
+            }
         }
-        let unique = Array(Set(resolved)).sorted()
-        guard unique != roots else { return }
-        roots = unique
-        scan()
     }
 
     func scan() {
@@ -119,11 +127,49 @@ final class GitStore: ObservableObject {
 
     // MARK: - Reading
 
-    /// The repository a folder belongs to, or nil if it is not in one.
-    private static func repositoryRoot(of path: String) -> String? {
-        var url = URL(fileURLWithPath: path)
+    /// The repositories a project folder covers.
+    ///
+    /// A folder you run Claude in is not necessarily a repository. It is just
+    /// as often the folder above several of them — one client, five repos —
+    /// and it can also sit inside one. So this looks at the folder itself,
+    /// then up for the repository containing it, and failing both, a couple of
+    /// levels down for the repositories it contains.
+    static func repositories(in path: String, maxDepth: Int = 2) -> [String] {
         let fm = FileManager.default
-        while url.path != "/" {
+        if fm.fileExists(atPath: (path as NSString).appendingPathComponent(".git")) {
+            return [path]
+        }
+        if let enclosing = enclosingRepository(of: path) { return [enclosing] }
+
+        var found: [String] = []
+        var frontier = [(path: path, depth: 0)]
+        while let next = frontier.popLast() {
+            guard next.depth < maxDepth,
+                  let children = try? fm.contentsOfDirectory(atPath: next.path) else { continue }
+            for child in children where !Self.skipped.contains(child) && !child.hasPrefix(".") {
+                let full = (next.path as NSString).appendingPathComponent(child)
+                var isDirectory: ObjCBool = false
+                guard fm.fileExists(atPath: full, isDirectory: &isDirectory), isDirectory.boolValue
+                else { continue }
+                if fm.fileExists(atPath: (full as NSString).appendingPathComponent(".git")) {
+                    found.append(full)          // repositories do not nest usefully
+                } else {
+                    frontier.append((full, next.depth + 1))
+                }
+            }
+        }
+        return found
+    }
+
+    /// Folders that are never a project of yours, and are expensive to walk.
+    private static let skipped: Set<String> = [
+        "node_modules", "vendor", "Library", "venv", ".venv", "dist", "build", "target",
+    ]
+
+    private static func enclosingRepository(of path: String) -> String? {
+        var url = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let fm = FileManager.default
+        while url.path != "/" && url.path != NSHomeDirectory() {
             if fm.fileExists(atPath: url.appendingPathComponent(".git").path) { return url.path }
             url.deleteLastPathComponent()
         }
