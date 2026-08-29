@@ -4,13 +4,18 @@ import SwiftUI
 struct UsageBars: View {
     @ObservedObject var usage: UsageStore
 
+    private static let barWidth: CGFloat = 90
+
     var body: some View {
-        VStack(spacing: 3) {
-            row("5h", usage.session)
-            row("Week", usage.week)
+        VStack(spacing: 5) {
+            // The 5-hour window is the one you wait on, so it counts down.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                row("5h", usage.session, trailing: usage.session?.countdown(from: context.date))
+            }
+            row("Week", usage.week, trailing: usage.week?.resets)
         }
         .padding(.horizontal, 12)
-        .padding(.top, 6)
+        .padding(.top, 8)
         .contentShape(Rectangle())
         .onTapGesture { usage.refresh() }
         .help(helpText)
@@ -25,19 +30,19 @@ struct UsageBars: View {
     }
 
     @ViewBuilder
-    private func row(_ label: String, _ window: UsageWindow?) -> some View {
-        HStack(spacing: 6) {
+    private func row(_ label: String, _ window: UsageWindow?, trailing: String?) -> some View {
+        HStack(spacing: 7) {
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 26, alignment: .leading)
+                .frame(width: 32, alignment: .leading)
 
             // Fixed width on purpose: a GeometryReader here reads the size of
             // the very inset it sits in, which makes the sidebar re-layout
             // while it is already laying out.
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.primary.opacity(0.09))
+                    .fill(Color.primary.opacity(0.12))
                     .frame(width: Self.barWidth)
                 if let window {
                     Capsule()
@@ -45,35 +50,33 @@ struct UsageBars: View {
                         .frame(width: Self.barWidth * CGFloat(window.percent) / 100)
                 }
             }
-            .frame(width: Self.barWidth, height: 5)
+            .frame(width: Self.barWidth, height: 7)
 
             if let window {
                 Text("\(window.percent)%")
-                    .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Self.color(for: window.level))
-                    .frame(width: 28, alignment: .trailing)
+                    .frame(width: 36, alignment: .trailing)
             } else if usage.isProbing {
                 ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.6)
-                    .frame(width: 28, alignment: .trailing)
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+                    .frame(width: 36, alignment: .trailing)
             } else {
                 Text("—")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
-                    .frame(width: 28, alignment: .trailing)
+                    .frame(width: 36, alignment: .trailing)
             }
 
-            Text(window?.resets ?? "")
-                .font(.system(size: 9))
+            Text(trailing ?? "")
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
         }
     }
-
-    private static let barWidth: CGFloat = 84
 
     private static func color(for level: Int) -> Color {
         switch level {
