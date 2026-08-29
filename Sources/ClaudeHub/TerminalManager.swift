@@ -9,6 +9,14 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Bumped when a process ends/restarts so views and status dots update.
     @Published private(set) var generation = 0
 
+    /// What each tab's terminal is doing right now, refreshed on a timer by
+    /// reading the visible screen — see `TerminalActivity`.
+    @Published private(set) var activity: [String: TerminalActivity] = [:]
+    /// Drives every pulsing dot from one clock: they breathe in step, and no
+    /// row has to mutate its own state while the table is laying it out.
+    @Published private(set) var pulse = false
+    private var activityTimer: Timer?
+
     private var terminals: [String: LocalProcessTerminalView] = [:]
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
@@ -36,6 +44,9 @@ final class TerminalManager: NSObject, ObservableObject {
                 return nil
             }
             return event
+        }
+        activityTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            self?.pollActivity()
         }
     }
 
@@ -101,6 +112,11 @@ final class TerminalManager: NSObject, ObservableObject {
         case .newSession:
             // ⌘N — a fresh Claude session in the tab's folder
             start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath))", in: tab.cwd)
+        case .command(let args):
+            // `claude auth login`, `auth logout` — the shell stays afterwards so
+            // the result is still readable instead of the tab dropping dead.
+            let command = ([claudePath] + args).map(ClaudeSession.shellQuote).joined(separator: " ")
+            start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
         case .shell:
             // Plain interactive shell in the tab's folder (⌘T)
             view.startProcess(
@@ -140,6 +156,83 @@ final class TerminalManager: NSObject, ObservableObject {
         }
         deadTabs.remove(tabID)
         generation += 1
+    }
+
+    // MARK: - Activity
+
+    func activity(of tabID: String) -> TerminalActivity {
+        if deadTabs.contains(tabID) { return .dead }
+        guard terminals[tabID] != nil else { return .stopped }
+        return activity[tabID] ?? .idle
+    }
+
+    /// Claude Code has no machine-readable "am I busy" channel, so this reads
+    /// what the session is showing: while it works it prints an
+    /// "esc to interrupt" hint, and permission prompts ask "Do you want to …".
+    private func pollActivity() {
+        guard !terminals.isEmpty else {
+            if !activity.isEmpty { activity = [:] }
+            return
+        }
+        var next: [String: TerminalActivity] = [:]
+        for (id, view) in terminals where !deadTabs.contains(id) {
+            next[id] = Self.classify(Self.visibleText(of: view))
+        }
+        if next != activity { activity = next }
+        if next.values.contains(where: \.pulses) {
+            pulse.toggle()
+        } else if pulse {
+            pulse = false
+        }
+    }
+
+    private static func classify(_ screen: String) -> TerminalActivity {
+        if screen.contains("esc to interrupt") { return .busy }
+        if screen.contains("Do you want to") { return .needsInput }
+        return .idle
+    }
+
+    /// The rows currently on screen, lowest-cost snapshot SwiftTerm offers.
+    private static func visibleText(of view: LocalProcessTerminalView) -> String {
+        let terminal = view.getTerminal()
+        var lines: [String] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            lines.append(line.translateToString(trimRight: true))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Slash commands
+
+    /// Types a slash command into a session. Only presses Return when the
+    /// prompt is provably empty — appending to half-typed text and submitting
+    /// it would send the user's own words to Claude by accident.
+    /// Returns whether it was submitted.
+    @discardableResult
+    func sendSlashCommand(_ command: String, to tabID: String) -> Bool {
+        guard let view = terminals[tabID], !deadTabs.contains(tabID) else { return false }
+        let submit = activity(of: tabID) == .idle
+            && Self.promptIsEmpty(Self.visibleText(of: view))
+        view.send(txt: submit ? command + "\r" : command)
+        view.window?.makeFirstResponder(view)
+        return submit
+    }
+
+    /// The prompt box renders as `│ > …`; an empty one has nothing after the
+    /// caret. Anything we cannot read confidently counts as "not empty".
+    private static func promptIsEmpty(_ screen: String) -> Bool {
+        for line in screen.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let unboxed = trimmed.hasPrefix("\u{2502}")     // │
+                ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                : trimmed
+            guard unboxed.hasPrefix(">") else { continue }
+            let rest = unboxed.dropFirst()
+                .trimmingCharacters(in: CharacterSet(charactersIn: " \u{2502}"))
+            return rest.isEmpty
+        }
+        return false
     }
 
     // MARK: - Theme (follows system appearance)

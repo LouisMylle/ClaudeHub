@@ -6,6 +6,7 @@ enum TerminalTabKind: Hashable {
     case resume(String)   // `claude --resume <session-id>`
     case newSession       // a brand-new `claude` session in the tab's folder
     case shell            // plain login shell
+    case command([String])   // one-shot `claude <args…>`, e.g. auth login
 }
 
 struct TerminalTab: Identifiable, Hashable {
@@ -19,7 +20,13 @@ struct TerminalTab: Identifiable, Hashable {
         return nil
     }
 
-    var isClaude: Bool { kind != .shell }
+    /// A live Claude conversation — the tabs slash commands can be sent to.
+    var isConversation: Bool {
+        switch kind {
+        case .resume, .newSession: return true
+        case .shell, .command: return false
+        }
+    }
 }
 
 final class TabsModel: ObservableObject {
@@ -67,6 +74,21 @@ final class TabsModel: ObservableObject {
             title: Self.folderName(folder),
             cwd: folder,
             kind: .shell
+        ))
+    }
+
+    /// Runs a `claude` subcommand in its own tab — `auth login`, `auth logout`.
+    /// Reusing an existing tab of the same command keeps them from piling up.
+    func openCommand(_ args: [String], title: String, cwd: String? = nil) {
+        let id = "cmd-\(args.joined(separator: " "))"
+        if tabs.contains(where: { $0.id == id }) {
+            close(id)   // a finished login tab would otherwise just sit there
+        }
+        append(TerminalTab(
+            id: id,
+            title: title,
+            cwd: cwd ?? currentFolder,
+            kind: .command(args)
         ))
     }
 

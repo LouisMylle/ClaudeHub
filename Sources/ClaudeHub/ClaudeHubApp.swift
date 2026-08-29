@@ -30,12 +30,14 @@ struct ClaudeHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = SessionStore()
     @StateObject private var tabs = TabsModel()
+    @StateObject private var accounts = AccountStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(tabs)
+                .environmentObject(accounts)
         }
         .defaultSize(width: 1200, height: 760)
         .commands {
@@ -62,6 +64,26 @@ struct ClaudeHubApp: App {
                 Button("Close Window") { NSApp.keyWindow?.performClose(nil) }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
             }
+            CommandMenu("Claude") {
+                Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
+                    .keyboardShortcut("u", modifiers: .command)
+                    .disabled(!ClaudeCommands.canSend(tabs))
+                Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
+                    .disabled(!ClaudeCommands.canSend(tabs))
+                Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
+                    .disabled(!ClaudeCommands.canSend(tabs))
+                Button("Model…") { ClaudeCommands.send("/model", tabs: tabs) }
+                    .disabled(!ClaudeCommands.canSend(tabs))
+
+                Divider()
+
+                Button("Switch Account…") {
+                    ClaudeCommands.logIn(as: nil, accounts: accounts, tabs: tabs)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                AccountItems(accounts: accounts, tabs: tabs)
+            }
             CommandMenu("Tabs") {
                 ForEach(1..<10, id: \.self) { number in
                     Button("Tab \(number)") { tabs.activate(index: number - 1) }
@@ -76,8 +98,11 @@ struct ClaudeHubApp: App {
 /// The File menu. A view (rather than inline buttons) so it can reach
 /// `openWindow` for "New Window", which `.newItem` no longer provides.
 private struct NewItemCommands: View {
-    @ObservedObject var store: SessionStore
-    @ObservedObject var tabs: TabsModel
+    // Plain references, not @ObservedObject: these commands only call methods,
+    // they show no state. Observing would rebuild the File menu on every
+    // session scan, which re-enters the sidebar's layout.
+    let store: SessionStore
+    let tabs: TabsModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {

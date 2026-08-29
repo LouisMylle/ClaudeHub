@@ -19,7 +19,8 @@ resumes in an embedded terminal, in the right folder, instantly.
 </div>
 
 > Fork of [LouisMylle/ClaudeHub](https://github.com/LouisMylle/ClaudeHub),
-> adding session deletion and one-key ways to start a new session or terminal.
+> adding session deletion, one-key ways to start a new session or terminal,
+> account switching with usage shortcuts, and live per-session status dots.
 
 ## Why
 
@@ -41,6 +42,16 @@ off.
   current folder, `⇧⌘N` in any folder you pick; the `+` in the toolbar also
   lists your projects, and every project row has its own `+`. `⌘T` opens a
   plain shell in the same folder
+- 👤 **Account switching** — the sidebar footer shows which account (and plan)
+  you are burning limits on. Hit your 5-hour or weekly cap and one click logs
+  you into another: ClaudeHub remembers the addresses you use and hands the
+  login to `claude auth login --email …`, so the real browser flow runs and no
+  credential is ever stored by the app
+- 📊 **Usage at a glance** — `⌘U` drops `/usage` into the session you are
+  looking at; `/status`, `/context` and `/model` are one menu item away
+- 🟢 **Live status dots** — green when a session waits on you, pulsing amber
+  while Claude is working, pulsing blue when a permission prompt needs an
+  answer. Scan the sidebar to see which session wants you
 - 🗑️ **Delete sessions** — remove a chat (or every chat in a project) for good
   from the context menu or with `⌫`. Transcript, tool results, and session env
   go to the **Trash**, so a mis-click is recoverable in Finder
@@ -89,6 +100,8 @@ package.
 | Keys | Action |
 | --- | --- |
 | `⇧↩` | Newline in the Claude Code prompt (instead of submitting) |
+| `⌘U` | Usage & limits in the current session (`/usage`) |
+| `⇧⌘L` | Switch account (`claude auth login`) |
 | `⌘N` | New Claude session in the current folder |
 | `⇧⌘N` | New Claude session in a folder you pick |
 | `⌘T` | New shell tab in the current folder |
@@ -115,7 +128,19 @@ zsh -l -c "cd <cwd> && exec claude --resume <session-id>"
 inside a SwiftTerm view that stays alive per tab; a new session is the same
 command without `--resume`. Deleting a chat moves its `.jsonl`, its sidecar
 `<session-id>/` folder, and `~/.claude/session-env/<session-id>` to the Trash —
-nothing is unlinked outright. MCP servers are read from
+nothing is unlinked outright.
+
+Accounts are read with `claude auth status --json` and changed with
+`claude auth login` / `logout` in a visible tab, so ClaudeHub never touches a
+token or the keychain. Note that logging in swaps the account for the `claude`
+CLI everywhere, not just in ClaudeHub; sessions already running keep their
+current credentials until they re-authenticate.
+
+Claude Code exposes no "am I busy" signal, so the status dots read the session's
+own screen: it prints an `esc to interrupt` hint while it works, and permission
+prompts ask `Do you want to …`. Slash commands from the menu are typed into the
+session and only submitted when the prompt is provably empty — otherwise they
+are left for you to send, so a half-typed message is never mangled. MCP servers are read from
 `~/.claude.json` and per-project `.mcp.json` files; all mutations go through
 `claude mcp add` / `claude mcp remove` so ClaudeHub never hand-edits your
 config.

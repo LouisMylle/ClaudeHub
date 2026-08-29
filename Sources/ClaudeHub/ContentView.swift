@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var store: SessionStore
     @EnvironmentObject var tabs: TabsModel
+    @EnvironmentObject var accounts: AccountStore
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var updates = UpdateChecker.shared
     @Environment(\.colorScheme) private var colorScheme
@@ -56,10 +57,13 @@ struct ContentView: View {
         }
         .onAppear {
             store.refresh()
+            accounts.refresh()
             updates.check()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             store.refresh()
+            // Coming back from the login page in the browser lands here.
+            accounts.refresh()
         }
         .onChange(of: selectedSessionID) { _, id in
             guard let id, let session = session(withID: id) else { return }
@@ -97,7 +101,7 @@ struct ContentView: View {
                 Section {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
-                                   isRunning: terminalManager.isRunning(session.id),
+                                   activity: terminalManager.activity(of: session.id),
                                    isHidden: store.hiddenSessionIDs.contains(session.id))
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
@@ -117,10 +121,12 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                Text("\(store.projects.count) projects · \(store.projects.map(\.sessions.count).reduce(0, +)) sessions · v\(UpdateChecker.currentVersion)")
+                AccountChip(accounts: accounts, tabs: tabs)
+                Spacer()
+                Text("\(store.projects.map(\.sessions.count).reduce(0, +)) sessions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
+                    .help("\(store.projects.count) projects · ClaudeHub v\(UpdateChecker.currentVersion)")
                 if store.isLoading { ProgressView().controlSize(.small) }
                 if updates.updateAvailable, let version = updates.latestVersion {
                     Button {
@@ -207,7 +213,8 @@ struct ContentView: View {
         if let tab = tabs.activeTab {
             VStack(spacing: 0) {
                 TabBarView(newSession: { newSession() },
-                           newSessionElsewhere: { newSessionInChosenFolder() })
+                           newSessionElsewhere: { newSessionInChosenFolder() },
+                           accounts: accounts)
                 Divider()
                 TerminalHostView(tab: tab, generation: terminalManager.generation)
                     .background(terminalBackground)
@@ -376,6 +383,7 @@ private struct TabBarView: View {
     @ObservedObject var terminalManager = TerminalManager.shared
     let newSession: () -> Void
     let newSessionElsewhere: () -> Void
+    @ObservedObject var accounts: AccountStore
 
     var body: some View {
         HStack(spacing: 4) {
@@ -385,7 +393,7 @@ private struct TabBarView: View {
                         TabChip(
                             tab: tab,
                             isActive: tab.id == tabs.activeTabID,
-                            isDead: terminalManager.isDead(tab.id),
+                            activity: terminalManager.activity(of: tab.id),
                             activate: { tabs.activeTabID = tab.id },
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
@@ -394,6 +402,19 @@ private struct TabBarView: View {
                 }
                 .padding(.vertical, 5)
             }
+            Menu {
+                Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
+                Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
+                Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
+                Divider()
+                AccountItems(accounts: accounts, tabs: tabs)
+            } label: {
+                Image(systemName: "gauge.with.needle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Usage, limits and account switching (⌘U)")
             Menu {
                 Button("New Session Here") { newSession() }
                 Button("New Session in Folder…") { newSessionElsewhere() }
@@ -417,24 +438,23 @@ private struct TabBarView: View {
 private struct TabChip: View {
     let tab: TerminalTab
     let isActive: Bool
-    let isDead: Bool
+    let activity: TerminalActivity
     let activate: () -> Void
     let restart: () -> Void
     let close: () -> Void
 
     var body: some View {
         HStack(spacing: 5) {
-            if isDead {
+            if activity == .dead {
                 Button(action: restart) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 9, weight: .bold))
                 }
                 .buttonStyle(.plain)
                 .help("Session ended — restart")
-            } else if tab.isClaude {
-                Circle()
-                    .fill(isActive ? Color.green : Color.secondary.opacity(0.5))
-                    .frame(width: 6, height: 6)
+            } else if tab.isConversation {
+                ActivityDot(activity: activity, size: 6)
+                    .opacity(isActive || activity.pulses ? 1 : 0.55)
             } else {
                 Image(systemName: "terminal")
                     .font(.system(size: 9, weight: .medium))
@@ -470,7 +490,7 @@ private struct TabChip: View {
 
 private struct SessionRow: View {
     let session: ClaudeSession
-    let isRunning: Bool
+    let activity: TerminalActivity
     let isHidden: Bool
 
     var body: some View {
@@ -488,11 +508,8 @@ private struct SessionRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            if isRunning {
-                Circle()
-                    .fill(.green)
-                    .frame(width: 7, height: 7)
-                    .help("Terminal running")
+            if activity != .stopped {
+                ActivityDot(activity: activity)
             }
         }
         .padding(.vertical, 1)
@@ -521,7 +538,11 @@ private struct ProjectHeader<MenuContent: View>: View {
             .help("New Claude session in \(project.name)")
         }
         .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
+        // Deferred: setting state straight from a hover callback mutates the
+        // row while AppKit is still laying the table out.
+        .onHover { hovering in
+            DispatchQueue.main.async { isHovering = hovering }
+        }
         .help(project.path)
         .contextMenu { menu() }
     }
