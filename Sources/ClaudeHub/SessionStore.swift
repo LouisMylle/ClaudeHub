@@ -119,10 +119,10 @@ final class SessionStore: ObservableObject {
                 id: cwd,
                 name: projectName(for: cwd),
                 path: cwd,
-                sessions: sessions.sorted { $0.lastModified > $1.lastModified }
+                sessions: sessions.sorted { $0.lastActivity > $1.lastActivity }
             )
         }
-        .sorted { $0.lastModified > $1.lastModified }
+        .sorted { $0.lastActivity > $1.lastActivity }
     }
 
     private static func projectName(for cwd: String) -> String {
@@ -164,6 +164,11 @@ final class SessionStore: ObservableObject {
             }
         }
 
+        // Below the head limit, `head` already is the whole file. Above it,
+        // only `tail` reaches the end — and it starts mid-line.
+        let body = tail.isEmpty ? head : tail
+        let partial = !tail.isEmpty
+
         // Sidechain (subagent) transcripts live alongside main sessions in old versions — skip them.
         if firstJSONValue(in: head, key: "isSidechain") == "true" { return nil }
 
@@ -176,13 +181,62 @@ final class SessionStore: ObservableObject {
             ?? firstUserPrompt(in: head)
             ?? "Session \(id.prefix(8))"
 
+        // The mtime says when the file was last *touched*, which is not the
+        // same question: opening or resuming a session rewrites its transcript,
+        // and a housekeeping pass can stamp a dozen of them within one second.
+        // A week-old chat then climbs to the top of the list looking minutes
+        // old. The transcript timestamps every line it writes, so the honest
+        // answer is already inside the bytes we are holding — no second read.
+        let lastActivity = lastTimestamp(in: body, partial: partial, answersOnly: true)
+            ?? lastTimestamp(in: body, partial: partial, answersOnly: false)
+            ?? mtime
+
         return ClaudeSession(
             id: id,
             title: title,
             cwd: cwd,
-            lastModified: mtime,
+            lastActivity: lastActivity,
             fileURL: file
         )
+    }
+
+    /// The last line the model actually wrote. Scanning backwards stops at the
+    /// first hit, so this costs a handful of string compares over a slice that
+    /// is already in memory.
+    ///
+    /// `answersOnly` is the strict reading — a transcript can pick up trailing
+    /// bookkeeping lines long after the conversation ended, and those are not
+    /// an answer. It falls back to any timestamped line for the rare session
+    /// whose last answer sits further back than the tail we read.
+    ///
+    /// Sidechain lines are a subagent talking to itself, never to the user.
+    private static func lastTimestamp(in text: String,
+                                      partial: Bool,
+                                      answersOnly: Bool) -> Date? {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        // A slice taken from the middle of the file opens on half a line.
+        if partial, !lines.isEmpty { lines.removeFirst() }
+
+        for line in lines.reversed() {
+            if line.contains("\"isSidechain\":true") { continue }
+            if answersOnly, !line.contains("\"type\":\"assistant\"") { continue }
+            guard let stamp = firstJSONString(in: String(line), key: "timestamp"),
+                  let date = isoDate(stamp) else { continue }
+            return date
+        }
+        return nil
+    }
+
+    private static let isoWithMilliseconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let isoWholeSeconds = ISO8601DateFormatter()
+
+    private static func isoDate(_ text: String) -> Date? {
+        isoWithMilliseconds.date(from: text) ?? isoWholeSeconds.date(from: text)
     }
 
     /// Extracts the raw token following `"key":` (for booleans/numbers).

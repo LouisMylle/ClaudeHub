@@ -49,14 +49,18 @@ off.
   login to `claude auth login --email …`, so the real browser flow runs and no
   credential is ever stored by the app
 - 📊 **Limits always on screen** — two bars in the sidebar footer show your
-  5-hour and weekly usage with the reset time, green through red, refreshed
-  every 10 minutes. `⌘U` still drops `/usage` into the session you are looking
-  at; `/status`, `/context` and `/model` are one menu item away
+  5-hour and weekly usage with a live countdown to the reset, green through
+  red, and they name the account they belong to. `⌘U` still drops `/usage` into
+  the session you are looking at; `/status`, `/context` and `/model` are one
+  menu item away
 - ⚡ **Instant account switching** — save a `claude setup-token` token per
-  account and start a session as any of them with no browser and no code.
-  Tokens travel per session, so **two tabs can run as two accounts at once** —
-  hit a limit on one, carry on in the other without signing anything out.
-  Right-click a session to *Resume as* another account
+  account and switch with one click, no browser. The token is checked against
+  the API before it is kept, and the menu tells you what that check
+  established. Picking an account **moves every open conversation to it** and
+  resumes each one where it was; anything mid-answer, or holding a paste you
+  have not sent, moves the moment it safely can rather than being cut off.
+  Tokens travel per session, so **two tabs can still run as two accounts at
+  once** — right-click a session to *Resume as* another account
 - 🟢 **Live status dots** — green when a session waits on you, pulsing amber
   while Claude is working, pulsing blue when a permission prompt needs an
   answer. Scan the sidebar to see which session wants you
@@ -151,13 +155,32 @@ keychain and passes it to sessions you start as that account through
 account you are not signed in as, and several accounts can run side by side —
 which `/login` cannot do, since it changes the one account the CLI uses
 machine-wide. Forgetting a profile deletes the keychain item; revoke the token
-itself at claude.ai to kill it for good. ClaudeHub is ad-hoc signed, so macOS
-asks permission for the keychain item again after each rebuild.
+itself at claude.ai to kill it for good.
 
-The limit bars come from `/usage`. Those numbers live only in the API's
-responses, so ClaudeHub asks the same way you would: it starts a `claude`
-session off-screen, sends `/usage`, reads the panel and quits. The probe runs no
-prompt, so it costs nothing and leaves no transcript behind.
+ClaudeHub is ad-hoc signed, so every build is a new program as far as the
+keychain is concerned and macOS asks permission for the item again after each
+update. The tokens are therefore read once per launch, off the main thread, and
+a refusal is shown rather than swallowed: a tab that could not get its token
+says so on its chip instead of quietly running as whoever is signed in.
+
+A `setup-token` token will not name its account — the OAuth profile endpoint
+refuses it for want of scope — but the API does say which organisation it
+billed a request to. ClaudeHub compares that with the signed-in account's
+organisation, so the account menu can tell you the token really is a different
+account, instead of you having to trust the label you typed.
+
+The limit bars are read two ways, because the two kinds of account are told
+different things. Signed in, ClaudeHub asks the way you would: it starts a
+`claude` session off-screen, sends `/usage` and reads the panel, which runs no
+prompt and costs nothing. A token-authenticated session is never shown those
+windows — Claude Code runs it as "Claude API", and the panel comes back without
+them — so for a saved account the numbers come from the API's own
+`anthropic-ratelimit-unified-*` headers instead, read off a one-token request
+made at most every three minutes, and only while the window is in front.
+
+Which is why the bars say whose numbers they are: a reading taken before the
+token is out of the keychain is the signed-in account's, and a percentage
+without an owner is how one account's usage gets mistaken for another's.
 
 Claude Code exposes no "am I busy" signal, so the status dots read the session's
 own screen: it prints an `esc to interrupt` hint while it works, and permission

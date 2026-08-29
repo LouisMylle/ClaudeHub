@@ -1,8 +1,24 @@
 import SwiftUI
 
+/// What the footer is showing, and whose it is.
+///
+/// The bars follow the tab you are looking at, not the account new sessions
+/// would start on. Those are different things the moment you switch account
+/// with work still running, and showing the wrong one is how a session that
+/// has hit its limit sits under a bar reading 1%.
+struct UsageReadout: Equatable {
+    var session: UsageWindow?
+    var week: UsageWindow?
+    /// The account these numbers belong to, spelled out for the footer.
+    var account: String
+    var problem: String?
+    var isBusy: Bool
+}
+
 /// The 5-hour and weekly limits, always on screen in the sidebar footer.
 struct UsageBars: View {
-    @ObservedObject var usage: UsageStore
+    let readout: UsageReadout
+    let refresh: () -> Void
 
     private static let barWidth: CGFloat = 90
 
@@ -11,24 +27,40 @@ struct UsageBars: View {
             // Both windows count down; the raw text is only a fallback for a
             // reset the panel phrased in some way we could not turn into a date.
             TimelineView(.periodic(from: .now, by: 30)) { context in
-                VStack(spacing: 5) {
-                    row("5h", usage.session, at: context.date)
-                    row("Week", usage.week, at: context.date)
+                VStack(alignment: .leading, spacing: 5) {
+                    row("5h", readout.session, at: context.date)
+                    row("Week", readout.week, at: context.date)
+                    // Never a bare percentage: it says whose it is.
+                    Text(readout.account)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .padding(.leading, 39)
                 }
             }
             Button {
-                usage.refresh()
+                refresh()
             } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
-                    .rotationEffect(.degrees(usage.isProbing ? 360 : 0))
-                    .animation(usage.isProbing
-                               ? .linear(duration: 1).repeatForever(autoreverses: false)
-                               : .default,
-                               value: usage.isProbing)
+                // A failed read is worth an icon of its own: silently showing
+                // "—" forever is how a broken account looks like a quiet one.
+                //
+                // The two symbols are deliberately separate views. Swapping the
+                // name on one shared Image keeps the view — and its in-flight
+                // spin — alive across the swap, so the triangle inherits the
+                // turn and ends up sitting there tilted.
+                Group {
+                    if showsProblem {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.orange)
+                    } else {
+                        SpinningRefreshIcon(isSpinning: readout.isBusy)
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
             }
             .buttonStyle(.borderless)
-            .disabled(usage.isProbing)
+            .clickable()
+            .disabled(readout.isBusy)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -36,19 +68,28 @@ struct UsageBars: View {
         .help(helpText)
     }
 
+    /// An account with nothing to report is not a fault, so it does not get a
+    /// warning triangle — only something that actually went wrong does.
+    private var showsProblem: Bool {
+        readout.problem != nil && !readout.isBusy
+    }
+
     private var helpText: String {
-        if let error = usage.errorMessage { return error }
-        guard let updated = usage.lastUpdated else {
-            return usage.isProbing ? "Reading /usage…" : "Click ↻ to read your limits"
-        }
-        let seconds = Int(Date().timeIntervalSince(updated))
-        let ago = seconds < 60 ? "just now" : "\(seconds / 60) min ago"
-        return "Updated \(ago), and every minute — click ↻ for now"
+        if let problem = readout.problem { return "\(problem)\n\nClick to try again." }
+        return """
+            The limits of \(readout.account) — the account this tab is running as, \
+            which is not always the account new sessions start on.
+            Click ↻ to read them now.
+            """
     }
 
     @ViewBuilder
     private func row(_ label: String, _ window: UsageWindow?, at now: Date) -> some View {
-        let trailing = window?.countdown(from: now) ?? window?.resets
+        // A blank row reads as "nothing to report"; the truth is "we could not
+        // find out", and the two deserve different words.
+        let trailing = window?.countdown(from: now)
+            ?? window?.resets
+            ?? (showsProblem ? "unavailable" : nil)
         HStack(spacing: 7) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
@@ -75,7 +116,7 @@ struct UsageBars: View {
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Self.color(for: window.level))
                     .frame(width: 36, alignment: .trailing)
-            } else if usage.isProbing {
+            } else if readout.isBusy {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.7)
@@ -89,7 +130,8 @@ struct UsageBars: View {
 
             Text(trailing ?? "")
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(window == nil && showsProblem ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
@@ -102,5 +144,68 @@ struct UsageBars: View {
         case 1: return .orange
         default: return .green
         }
+    }
+}
+
+/// The refresh glyph, turned by the clock rather than by an implicit animation.
+///
+/// The obvious `.rotationEffect(isProbing ? 360 : 0)` plus `repeatForever` gets
+/// two things wrong, and both are visible on an 11pt icon:
+///
+/// - The store publishes while it is reading, so the body is rebuilt mid-turn
+///   and the repeating animation is re-seeded from wherever the icon happens to
+///   be. The turn stutters and looks like it keeps changing speed.
+/// - `arrow.clockwise` does not turn around the middle of its layout box. Its
+///   arc is centred at y ≈ 0.559 of that box — measured off the rendered glyph
+///   at four point sizes, stable to ±0.003 — so spinning around `.center` walks
+///   the icon around a small circle instead of turning it on the spot.
+///
+/// Driving the angle off the wall clock fixes the first: there is no animation
+/// state to restart, so a rebuild lands on exactly the angle the time says it
+/// should. The measured anchor fixes the second.
+private struct SpinningRefreshIcon: View {
+    var isSpinning: Bool
+
+    /// One turn. A second reads as a flicker at this size; this reads as a turn.
+    private static let period: Double = 1.3
+    /// Where the arc's circle actually sits inside the glyph's layout box.
+    private static let axis = UnitPoint(x: 0.5, y: 0.559)
+
+    /// Where the icon rests once it has stopped, and how it gets there.
+    @State private var restAngle: Double = 0
+
+    var body: some View {
+        Group {
+            if isSpinning {
+                TimelineView(.animation) { context in
+                    icon(angle: Self.angle(at: context.date))
+                }
+            } else {
+                icon(angle: restAngle)
+            }
+        }
+        .onChange(of: isSpinning) { _, spinning in
+            guard !spinning else { return }
+            // Coast to upright from wherever the turn was, rather than snapping
+            // there: a read that finishes fast is otherwise a visible jolt.
+            restAngle = Self.angle(at: .now)
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: 0.3)) { restAngle = 360 }
+            }
+        }
+    }
+
+    private func icon(angle: Double) -> some View {
+        Image(systemName: "arrow.clockwise")
+            .foregroundStyle(Color.secondary)
+            .rotationEffect(.degrees(angle), anchor: Self.axis)
+    }
+
+    /// The angle straight from the clock: nothing to fall out of step with, and
+    /// nothing to restart when the view is rebuilt.
+    private static func angle(at date: Date) -> Double {
+        let phase = date.timeIntervalSinceReferenceDate
+            .truncatingRemainder(dividingBy: period) / period
+        return phase * 360
     }
 }

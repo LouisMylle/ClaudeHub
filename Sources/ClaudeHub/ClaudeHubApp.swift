@@ -6,6 +6,12 @@ extension Notification.Name {
     static let newClaudeSessionInFolder = Notification.Name("ClaudeHub.newSessionInFolder")
     /// Menu → "Delete Session": acted on by the window holding the selection.
     static let deleteSelectedSession = Notification.Name("ClaudeHub.deleteSelectedSession")
+    static let showMCPManager = Notification.Name("ClaudeHub.showMCPManager")
+    static let splitActiveTab = Notification.Name("ClaudeHub.splitActiveTab")
+    /// ⌘F, ⌘G, ⇧⌘G — find in the tab you are looking at.
+    static let findInTab = Notification.Name("ClaudeHub.findInTab")
+    static let findNextMatch = Notification.Name("ClaudeHub.findNextMatch")
+    static let findPreviousMatch = Notification.Name("ClaudeHub.findPreviousMatch")
     /// The account sessions run as changed, so the limits belong to someone else now.
     static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
 }
@@ -34,6 +40,7 @@ struct ClaudeHubApp: App {
     @StateObject private var tabs = TabsModel()
     @StateObject private var accounts = AccountStore()
     @StateObject private var usage = UsageStore()
+    @StateObject private var git = GitStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -42,6 +49,7 @@ struct ClaudeHubApp: App {
                 .environmentObject(tabs)
                 .environmentObject(accounts)
                 .environmentObject(usage)
+                .environmentObject(git)
         }
         .defaultSize(width: 1200, height: 760)
         .commands {
@@ -53,10 +61,33 @@ struct ClaudeHubApp: App {
             }
             CommandGroup(after: .pasteboard) {
                 Divider()
+                Button("Find…") {
+                    NotificationCenter.default.post(name: .findInTab, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("Find Next") {
+                    NotificationCenter.default.post(name: .findNextMatch, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: .command)
+                Button("Find Previous") {
+                    NotificationCenter.default.post(name: .findPreviousMatch, object: nil)
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                Divider()
+                Button("MCP Servers…") {
+                    NotificationCenter.default.post(name: .showMCPManager, object: nil)
+                }
+                Divider()
                 Button("Delete Session…") {
                     NotificationCenter.default.post(name: .deleteSelectedSession, object: nil)
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Open Tab Beside") {
+                    NotificationCenter.default.post(name: .splitActiveTab, object: nil)
+                }
+                .keyboardShortcut("\\", modifiers: .command)
             }
             // Take over ⌘W: close the active tab, not the window
             CommandGroup(replacing: .saveItem) {
@@ -96,7 +127,7 @@ struct ClaudeHubApp: App {
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
 
-                AccountItems(accounts: accounts, tabs: tabs)
+                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
             }
             CommandMenu("Tabs") {
                 ForEach(1..<10, id: \.self) { number in

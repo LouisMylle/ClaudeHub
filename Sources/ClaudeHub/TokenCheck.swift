@@ -1,0 +1,178 @@
+import Foundation
+
+/// What a token turns out to be worth, asked of the API rather than assumed.
+enum TokenCheckResult {
+    /// The token authenticates, and the API named the organisation it billed
+    /// the test request to.
+    case valid(organizationID: String?)
+    /// The token itself is no good: wrong, revoked, or expired.
+    case rejected(String)
+    /// We could not tell (offline, timeout). The token may be perfectly fine.
+    case unreachable(String)
+}
+
+/// Checks an OAuth token by using it, the way a session would.
+///
+/// This is the difference between "saved" and "works": pasting a token proves
+/// nothing until something has actually presented it.
+///
+/// It answers the harder question too. A `claude setup-token` token never names
+/// its account — Claude Code shows it as "Claude API", and the OAuth profile
+/// endpoint refuses it for want of scope — but the API does say which
+/// organisation a request was billed to. Comparing that with the signed-in
+/// account's organisation is what turns "the label says Upgrade Estate" into
+/// something checked.
+enum TokenCheck {
+    private static let countTokens = URL(string: "https://api.anthropic.com/v1/messages/count_tokens")!
+    private static let messages = URL(string: "https://api.anthropic.com/v1/messages")!
+    private static let model = "claude-haiku-4-5-20251001"
+
+    static func run(token: String, completion: @escaping (TokenCheckResult) -> Void) {
+        // `count_tokens` is free and changes nothing, which makes it the right
+        // question to ask of a token you are only checking.
+        var request = self.request(countTokens, token: token)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                return finish(.unreachable(error.localizedDescription), completion)
+            }
+            guard let http = response as? HTTPURLResponse else {
+                return finish(.unreachable("No answer from the API."), completion)
+            }
+            switch http.statusCode {
+            case 200..<300, 429:            // rate limited is still authenticated
+                finish(.valid(organizationID: organization(in: http)), completion)
+            case 401, 403:
+                let why = message(in: data)
+                if let why, isScopeComplaint(why) {
+                    // Authenticated, just not entitled to this endpoint.
+                    finish(.valid(organizationID: organization(in: http)), completion)
+                } else {
+                    finish(.rejected(why
+                        ?? "The token was rejected — it is wrong, revoked or expired."),
+                           completion)
+                }
+            default:
+                finish(.unreachable("The API answered \(http.statusCode)."), completion)
+            }
+        }.resume()
+    }
+
+    /// The rate-limit headers, for the usage readout.
+    ///
+    /// It has to be a real message: an endpoint that costs nothing reports no
+    /// limits, so `count_tokens` comes back with no rate-limit headers at all.
+    /// This asks the cheapest question there is, one token in and one out, and
+    /// reads the limits off the answer.
+    static func limits(token: String, completion: @escaping ([String: String]) -> Void) {
+        var request = self.request(messages, token: token)
+        request.timeoutInterval = 30
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "max_tokens": 1,
+            // A Claude Code token is authorised for Claude Code; the system
+            // line is what the CLI itself sends.
+            "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            var headers: [String: String] = [:]
+            if let http = response as? HTTPURLResponse {
+                headers = rateLimits(in: http)
+                // Nothing to show is the case worth being able to look into
+                // afterwards; a working read needs no record.
+                if headers.isEmpty {
+                    log(status: http.statusCode, response: http, error: message(in: data))
+                }
+            }
+            DispatchQueue.main.async { completion(headers) }
+        }.resume()
+    }
+
+    // MARK: - Asking
+
+    private static func request(_ url: URL, token: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        return request
+    }
+
+    // MARK: - Reading the answer
+
+    /// `anthropic-ratelimit-unified-5h-utilization` and friends.
+    private static func rateLimits(in response: HTTPURLResponse) -> [String: String] {
+        var limits: [String: String] = [:]
+        for (key, value) in response.allHeaderFields {
+            guard let name = (key as? String)?.lowercased(), let text = value as? String,
+                  name.contains("ratelimit") else { continue }
+            limits[name] = text
+        }
+        return limits
+    }
+
+    /// Which organisation the API billed the request to, whatever it calls the
+    /// header this month.
+    private static func organization(in response: HTTPURLResponse) -> String? {
+        for (key, value) in response.allHeaderFields {
+            guard let name = key as? String, let text = value as? String else { continue }
+            if name.lowercased().contains("organization"), !text.isEmpty { return text }
+        }
+        return nil
+    }
+
+    /// "does not meet scope requirement any_of(user:profile, user:office)" —
+    /// the API talking to a token it has already accepted as genuine.
+    private static func isScopeComplaint(_ message: String) -> Bool {
+        let text = message.lowercased()
+        return text.contains("scope") && !text.contains("invalid")
+    }
+
+    private static func message(in data: Data?) -> String? {
+        guard let data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = json["error"] as? [String: Any],
+              let text = error["message"] as? String else { return nil }
+        return text
+    }
+
+    private static func finish(_ result: TokenCheckResult,
+                               _ completion: @escaping (TokenCheckResult) -> Void) {
+        DispatchQueue.main.async { completion(result) }
+    }
+
+    /// Written only when a limits read comes back with nothing usable — the
+    /// header names are not documented, so this is what makes a change in them
+    /// knowable instead of a mystery.
+    private static func log(status: Int, response: HTTPURLResponse, error: String?) {
+        let folder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/ClaudeHub")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let names = response.allHeaderFields.keys.compactMap { $0 as? String }.sorted()
+        let entry = """
+
+            ===== \(Date()) — no rate-limit headers =====
+            status: \(status)
+            \(error.map { "error: \($0)\n" } ?? "")headers: \(names.joined(separator: ", "))
+
+            """
+        guard let data = entry.data(using: .utf8) else { return }
+        let file = folder.appendingPathComponent("token-check.log")
+        if let handle = try? FileHandle(forWritingTo: file) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: file)
+        }
+    }
+}
