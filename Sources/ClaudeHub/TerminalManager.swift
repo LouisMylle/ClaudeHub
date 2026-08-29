@@ -26,6 +26,12 @@ final class TerminalManager: NSObject, ObservableObject {
 
     private var keyMonitor: Any?
 
+    /// Terminal text size, shared by every tab and remembered across launches.
+    @Published private(set) var fontSize: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "terminalFontSize")
+        return (8.0...32.0).contains(stored) ? CGFloat(stored) : 12
+    }()
+
     override private init() {
         super.init()
         resolveClaudePath()
@@ -36,11 +42,18 @@ final class TerminalManager: NSObject, ObservableObject {
         // treats as "insert newline" instead of "submit" — matching VS Code's
         // integrated-terminal behavior. Plain terminals can't distinguish
         // Shift+Enter from Enter, so this is intercepted at the event level.
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 36,  // Return
                event.modifierFlags.contains(.shift),
                let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
                 terminal.send(txt: "\u{1b}\r")
+                return nil
+            }
+            // ⌘= is what most keyboards give for "bigger" without reaching for
+            // shift; the menu item binds ⌘+ for the same action.
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers == "=" {
+                self?.changeFontSize(by: 1)
                 return nil
             }
             return event
@@ -97,7 +110,7 @@ final class TerminalManager: NSObject, ObservableObject {
 
         let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view.processDelegate = self
-        view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         applyTheme(to: view)
 
         var env = ProcessInfo.processInfo.environment
@@ -264,6 +277,27 @@ final class TerminalManager: NSObject, ObservableObject {
             return rest.isEmpty
         }
         return false
+    }
+
+    // MARK: - Text size
+
+    func changeFontSize(by delta: CGFloat) { setFontSize(fontSize + delta) }
+
+    func resetFontSize() { setFontSize(12) }
+
+    private func setFontSize(_ size: CGFloat) {
+        let clamped = min(max(size, 8), 32)
+        guard clamped != fontSize else { return }
+        fontSize = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: "terminalFontSize")
+
+        let font = NSFont.monospacedSystemFont(ofSize: clamped, weight: .regular)
+        for view in terminals.values {
+            view.font = font
+            view.needsLayout = true
+            view.needsDisplay = true
+        }
+        generation += 1
     }
 
     // MARK: - Theme (follows system appearance)

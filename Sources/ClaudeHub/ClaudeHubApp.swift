@@ -66,6 +66,15 @@ struct ClaudeHubApp: App {
                 Button("Close Window") { NSApp.keyWindow?.performClose(nil) }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
             }
+            CommandGroup(after: .toolbar) {
+                Button("Bigger Text") { TerminalManager.shared.changeFontSize(by: 1) }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("Smaller Text") { TerminalManager.shared.changeFontSize(by: -1) }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") { TerminalManager.shared.resetFontSize() }
+                    .keyboardShortcut("0", modifiers: .command)
+                Divider()
+            }
             CommandMenu("Claude") {
                 Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
                     .keyboardShortcut("u", modifiers: .command)
