@@ -820,7 +820,11 @@ private struct TabStrip: View {
                     ForEach(section.tabs) { tab in
                         TabChip(
                             tab: tab,
-                            isActive: tab.id == tabs.activeTabID,
+                            // Showing in this pane, and whether this pane is
+                            // the one with the keyboard.
+                            isActive: tabs.groupActive.indices.contains(pane)
+                                && tabs.groupActive[pane] == tab.id,
+                            hasFocus: tab.id == tabs.activeTabID,
                             activity: terminalManager.activity(of: tab.id),
                             accountLabel: accounts.effectiveLabel,
                             account: terminalManager.profile(of: tab),
@@ -1092,7 +1096,10 @@ private struct PaneDivider: View {
 
 private struct TabChip: View {
     let tab: TerminalTab
+    /// This is the tab its pane is showing.
     let isActive: Bool
+    /// And that pane is the one you are typing in.
+    let hasFocus: Bool
     let activity: TerminalActivity
     let accountLabel: String
     /// The saved account this tab runs as, nil for the signed-in one.
@@ -1143,14 +1150,21 @@ private struct TabChip: View {
         .padding(.leading, 9)
         .padding(.trailing, 3)
         .padding(.vertical, 5)
+        // Two levels, because a split window has two current tabs and only one
+        // of them has the keyboard. Accent for the one you are typing in, a
+        // plain raised chip for the other pane's — which used to be drawn as an
+        // idle tab, leaving that half of the window with nothing marked at all.
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.accentColor.opacity(0.18)
+                .fill(hasFocus ? Color.accentColor.opacity(0.18)
+                      : isActive ? Color.primary.opacity(0.10)
                       : hovering ? Color.primary.opacity(0.07) : Color.clear)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isActive ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
+                .strokeBorder(hasFocus ? Color.accentColor.opacity(0.45)
+                              : isActive ? Color.primary.opacity(0.18) : Color.clear,
+                              lineWidth: 1)
         )
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -1183,7 +1197,7 @@ private struct TabChip: View {
                 .help("Session ended — restart")
             } else if tab.isConversation {
                 ActivityDot(activity: activity, size: 6)
-                    .opacity(isActive || activity.pulses ? 1 : 0.55)
+                    .opacity(isActive || hasFocus || activity.pulses ? 1 : 0.55)
             } else {
                 Image(systemName: "terminal")
                     .font(.system(size: 9, weight: .medium))
@@ -1191,7 +1205,7 @@ private struct TabChip: View {
             }
             Text(tab.title)
                 .font(.callout)
-                .foregroundStyle(isActive ? .primary : .secondary)
+                .foregroundStyle(isActive || hasFocus ? .primary : .secondary)
                 .lineLimit(1)
                 .frame(maxWidth: 180, alignment: .leading)
                 .fixedSize(horizontal: true, vertical: false)

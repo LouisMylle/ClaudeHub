@@ -463,7 +463,11 @@ final class TerminalManager: NSObject, ObservableObject {
 
             // "You've hit your session limit · resets 2:40am" — the one message
             // that explains a session that has gone quiet and will not answer.
-            let notice = Self.limitNotice(in: Self.visibleText(of: view))
+            //
+            // It is read off the screen, and the screen keeps it long after the
+            // window has reset, so it counts only while the reset it names is
+            // still ahead and the session is not plainly working.
+            let notice = state == .busy ? nil : Self.limitNotice(in: Self.visibleText(of: view))
             if limitNotices[id] != notice { limitNotices[id] = notice }
         }
         if next != activity { activity = next }
@@ -500,7 +504,36 @@ final class TerminalManager: NSObject, ObservableObject {
         guard let line = screen.split(separator: "\n").last(where: { line in
             markers.contains { line.contains($0) }
         }) else { return nil }
-        return line.trimmingCharacters(in: .whitespaces)
+        let notice = line.trimmingCharacters(in: .whitespaces)
+        // A reset that has already happened is a message about this morning,
+        // not about now.
+        if let reset = resetTime(in: notice), let at = resetDate(reset), at < Date() {
+            return nil
+        }
+        return notice
+    }
+
+    /// "2:40am" as a moment today, or tomorrow when that hour has passed and
+    /// the message is fresh enough to mean the coming one.
+    private static func resetDate(_ text: String, now: Date = Date()) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let normalised = text.uppercased()
+        for format in ["h:mma", "ha"] {
+            formatter.dateFormat = format
+            guard let time = formatter.date(from: normalised) else { continue }
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
+            guard let today = Calendar.current.date(bySettingHour: parts.hour ?? 0,
+                                                    minute: parts.minute ?? 0,
+                                                    second: 0,
+                                                    of: now) else { continue }
+            // Within the last few hours it is behind us; further back than that
+            // and the session means the same hour tomorrow.
+            return today > now || now.timeIntervalSince(today) < 6 * 3600
+                ? today
+                : Calendar.current.date(byAdding: .day, value: 1, to: today)
+        }
+        return nil
     }
 
     /// "resets 2:40am" out of the whole sentence, for a badge with no room.
