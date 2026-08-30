@@ -50,9 +50,23 @@ struct ContentView: View {
         return terminalManager.activity(of: tab.id)
     }
 
+    /// Where the conversation of the tab in front of you is written down.
+    private var activeTranscript: URL? {
+        guard let sessionID = tabs.activeTab?.sessionID else { return nil }
+        return session(withID: sessionID)?.fileURL
+    }
+
     private func step(forward: Bool) {
         guard let id = tabs.activeTabID, !findTerm.isEmpty else { return }
         findShown = true
+
+        // A conversation is searched in its transcript, so stepping walks the
+        // results rather than the handful of screens the terminal still holds.
+        guard findResults.isEmpty else {
+            let next = (findSelected ?? (forward ? -1 : 0)) + (forward ? 1 : -1)
+            findSelected = min(max(next, 0), findResults.count - 1)
+            return
+        }
         findMatches = terminalManager.find(findTerm, in: id, forward: forward)
     }
 
@@ -61,9 +75,26 @@ struct ContentView: View {
         guard !findTerm.isEmpty else {
             terminalManager.clearFind(in: id)
             findMatches = (0, 0)
+            findResults = []
+            findSelected = nil
             return
         }
-        findMatches = terminalManager.findFromStart(findTerm, in: id)
+        guard let transcript = activeTranscript else {
+            findResults = []
+            findMatches = terminalManager.findFromStart(findTerm, in: id)
+            return
+        }
+        let term = findTerm
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = TranscriptSearch.search(term, in: transcript)
+            DispatchQueue.main.async {
+                // The field may have moved on while the file was being read.
+                guard term == findTerm else { return }
+                findResults = found
+                findSelected = found.isEmpty ? nil : 0
+                findMatches = (found.isEmpty ? 0 : 1, found.count)
+            }
+        }
     }
 
     private func closeFind() {
@@ -71,6 +102,8 @@ struct ContentView: View {
         findShown = false
         findTerm = ""
         findMatches = (0, 0)
+        findResults = []
+        findSelected = nil
     }
 
     /// The limits of the account the tab you are looking at is running as.
@@ -204,6 +237,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .findInTab)) { _ in
             findShown = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusTab)) { note in
+            guard let id = note.object as? String else { return }
+            tabs.show(id)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .findNextMatch)) { _ in
             step(forward: true)
         }
@@ -250,6 +287,9 @@ struct ContentView: View {
             }
 
             if !git.dirtyRepos.isEmpty {
+                // Not selectable: the sidebar's selection is a session, and a
+                // repository row painted in selection blue turns a list of file
+                // names into something you cannot read.
                 Section("Changes") {
                     ForEach(git.dirtyRepos) { repo in
                         RepoRow(
@@ -262,10 +302,11 @@ struct ContentView: View {
                             openFile: { path in
                                 openInVSCode((repo.root as NSString).appendingPathComponent(path))
                             },
-                            showDiff: {
+                            showDiff: { tabs.openDiff(root: repo.root) },
+                            showRawDiff: {
                                 tabs.openScript(
                                     "git -c color.ui=always status --short; echo; git -c color.ui=always diff HEAD",
-                                    title: "Diff · \(repo.name)",
+                                    title: "git diff · \(repo.name)",
                                     cwd: repo.root
                                 )
                             },
@@ -276,6 +317,7 @@ struct ContentView: View {
                         )
                     }
                 }
+                .selectionDisabled()
             }
         }
         .listStyle(.sidebar)
@@ -475,10 +517,16 @@ struct ContentView: View {
                 }
                 Divider()
             }
-            TerminalHostView(tab: tab,
-                             generation: terminalManager.generation,
-                             isFocused: isFocused)
-                .background(terminalBackground)
+            if case .diff(let root) = tab.kind {
+                DiffView(root: root) { file in
+                    openInVSCode((root as NSString).appendingPathComponent(file))
+                }
+            } else {
+                TerminalHostView(tab: tab,
+                                 generation: terminalManager.generation,
+                                 isFocused: isFocused)
+                    .background(terminalBackground)
+            }
         }
     }
 
@@ -489,6 +537,8 @@ struct ContentView: View {
     @State private var findTerm = ""
     @State private var findShown = false
     @State private var findMatches = (index: 0, total: 0)
+    @State private var findResults: [TranscriptMatch] = []
+    @State private var findSelected: Int?
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -525,6 +575,9 @@ struct ContentView: View {
                 if findShown {
                     FindBar(term: $findTerm,
                             matches: findMatches,
+                            results: findResults,
+                            selected: $findSelected,
+                            searchesTranscript: activeTranscript != nil,
                             search: searchFromStart,
                             step: step,
                             close: closeFind)
@@ -864,11 +917,18 @@ private struct TabBarView: View {
     }
 }
 
-/// Find in the tab you are looking at — the scrollback included, since that is
-/// where the answer you are looking for usually is.
+/// Find in the tab you are looking at.
+///
+/// For a conversation that means the transcript, not the screen: the results
+/// are messages, so a match from three hours ago is as findable as one from a
+/// minute ago. A terminal tab has no transcript, so there it drives SwiftTerm's
+/// own search over the scrollback.
 private struct FindBar: View {
     @Binding var term: String
     let matches: (index: Int, total: Int)
+    let results: [TranscriptMatch]
+    @Binding var selected: Int?
+    let searchesTranscript: Bool
     let search: () -> Void
     let step: (Bool) -> Void
     let close: () -> Void
@@ -876,18 +936,31 @@ private struct FindBar: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            field
+            if !results.isEmpty {
+                Divider()
+                resultList
+            }
+        }
+        .background(.bar)
+        .onExitCommand(perform: close)
+    }
+
+    private var field: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            TextField("Find in this session", text: $term)
+            TextField(searchesTranscript ? "Find in this conversation" : "Find in this terminal",
+                      text: $term)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 .focused($focused)
                 .onChange(of: term) { _, _ in search() }
                 .onSubmit { step(true) }
             if !term.isEmpty {
-                Text(matches.total == 0 ? "none" : "\(matches.index) of \(matches.total)")
+                Text(counter)
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(matches.total == 0 ? Color.orange : Color.secondary)
             }
@@ -903,9 +976,75 @@ private struct FindBar: View {
         .font(.system(size: 11, weight: .medium))
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.bar)
         .onAppear { focused = true }
-        .onExitCommand(perform: close)
+    }
+
+    private var counter: String {
+        if matches.total == 0 { return "none" }
+        return "\(matches.index) of \(matches.total)"
+    }
+
+    private var resultList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(results) { match in
+                        row(match)
+                            .id(match.id)
+                        Divider().opacity(0.4)
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+            .onChange(of: selected) { _, index in
+                guard let index, results.indices.contains(index) else { return }
+                withAnimation { proxy.scrollTo(results[index].id, anchor: .center) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ match: TranscriptMatch) -> some View {
+        let isSelected = selected.map { results.indices.contains($0) && results[$0].id == match.id } ?? false
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(match.role)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(match.role == "You" ? Color.accentColor : Color.secondary)
+                if let date = match.date {
+                    Text(date, format: .dateTime.day().month().hour().minute())
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Text(highlighted(match.line))
+                .font(.system(size: 11))
+                .lineLimit(isSelected ? nil : 2)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .background(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        .contentShape(Rectangle())
+        .clickable()
+        .onTapGesture {
+            selected = results.firstIndex { $0.id == match.id }
+        }
+    }
+
+    /// The term picked out of the line, so a result can be read at a glance
+    /// instead of hunted through.
+    private func highlighted(_ line: String) -> AttributedString {
+        var text = AttributedString(line)
+        var cursor = text.startIndex
+        while let found = text[cursor...].range(of: term, options: .caseInsensitive) {
+            text[found].foregroundColor = .primary
+            text[found].backgroundColor = .yellow.opacity(0.28)
+            cursor = found.upperBound
+            if cursor >= text.endIndex { break }
+        }
+        return text
     }
 }
 
@@ -1160,6 +1299,8 @@ private struct RepoRow: View {
     /// A file is worth opening on its own; the repository is the coarse answer.
     let openFile: (String) -> Void
     let showDiff: () -> Void
+    /// The unified diff as git prints it, for when that is what you want.
+    let showRawDiff: () -> Void
     let reveal: () -> Void
     let canOpenInEditor: Bool
 
@@ -1198,7 +1339,7 @@ private struct RepoRow: View {
                     Button("Session", action: newSession)
                         .help("New Claude session in \(repo.name)")
                     Button("Diff", action: showDiff)
-                        .help("git status and git diff in a terminal tab")
+                        .help("The changes side by side, in a tab")
                     if canOpenInEditor {
                         Button("VS Code", action: openInEditor)
                             .help("Open \(repo.name) in VS Code")
@@ -1236,6 +1377,11 @@ private struct RepoRow: View {
                     // you close the laptop, so it does not read as an aside.
                     Text(repo.syncLabel)
                         .foregroundStyle(repo.isUnpushed ? Color.pending : Color.secondary)
+                    if let age = repo.age {
+                        Text("·")
+                        Text(age)
+                            .help("The oldest of these changes was written \(age) ago")
+                    }
                 }
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
@@ -1244,7 +1390,8 @@ private struct RepoRow: View {
             .help(repo.root)
             .contextMenu {
                 Button("New Session in \(repo.name)", action: newSession)
-                Button("Diff in a Tab", action: showDiff)
+                Button("Diff Side by Side", action: showDiff)
+                Button("git diff in a Terminal", action: showRawDiff)
                 if canOpenInEditor { Button("Open in VS Code", action: openInEditor) }
                 Divider()
                 Button("Reveal in Finder", action: reveal)
@@ -1311,7 +1458,8 @@ private struct ProjectHeader<MenuContent: View>: View {
 
     private var tooltip: String {
         repos.map { repo in
-            let state = repo.pending > 0 ? "\(repo.pending) uncommitted" : "clean"
+            var state = repo.pending > 0 ? "\(repo.pending) uncommitted" : "clean"
+            if let age = repo.age, repo.pending > 0 { state += ", oldest \(age)" }
             return "\(repo.name) · \(repo.branch) · \(state) · \(repo.syncLabel)"
         }.joined(separator: "\n")
     }

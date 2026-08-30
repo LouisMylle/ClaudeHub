@@ -1,5 +1,6 @@
 import AppKit
 import SwiftTerm
+import UserNotifications
 
 /// Keeps one live terminal per tab so switching in the sidebar
 /// doesn't kill running Claude processes.
@@ -50,6 +51,10 @@ final class TerminalManager: NSObject, ObservableObject {
     /// necessarily the one you are about to start a session on.
     @Published private(set) var limitNotices: [String: String] = [:]
     private var finishedAt: [String: Date] = [:]
+    private var busySince: [String: Date] = [:]
+    /// Tab titles, kept by TabsModel, so a notification can name the session
+    /// rather than its identifier.
+    var tabTitles: [String: String] = [:]
     /// The tabs on screen right now, so an answer you watched arrive is not
     /// then reported as something you missed.
     var visibleTabs: Set<String> = []
@@ -204,7 +209,9 @@ final class TerminalManager: NSObject, ObservableObject {
             // The shell stays afterwards, so the output can be scrolled and
             // the command run again.
             start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
-        case .shell:
+        case .shell, .diff:
+            // A diff tab has no process; it never asks for a terminal, and the
+            // case is here only because the switch must cover it.
             // Plain interactive shell in the tab's folder (⌘T)
             view.startProcess(
                 executable: "/bin/zsh",
@@ -385,6 +392,30 @@ final class TerminalManager: NSObject, ObservableObject {
     /// When a session last stopped working, for "finished 3 min ago".
     func finishedAt(_ tabID: String) -> Date? { finishedAt[tabID] }
 
+    /// Tells you an answer arrived while you were in another app.
+    ///
+    /// Only for work that took long enough to walk away from — a reply that
+    /// lands in ten seconds is one you are still watching, and a banner for it
+    /// is noise. No sound: it is an answer, not an alarm.
+    private func announce(_ tabID: String, after seconds: TimeInterval) {
+        guard seconds >= 60 else { return }
+        let content = UNMutableNotificationContent()
+        content.title = tabTitles[tabID] ?? "Claude session"
+        content.body = "Finished after \(Self.spell(seconds))."
+        content.userInfo = ["tab": tabID]
+        let request = UNNotificationRequest(identifier: "finished-\(tabID)-\(Date().timeIntervalSince1970)",
+                                            content: content,
+                                            trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private static func spell(_ seconds: TimeInterval) -> String {
+        let value = Int(seconds)
+        if value >= 3_600 { return "\(value / 3_600) hr \((value % 3_600) / 60) min" }
+        if value >= 60 { return "\(value / 60) min" }
+        return "\(value) sec"
+    }
+
     /// Looking at a session is what marks it read.
     func markRead(_ tabID: String) {
         guard unread.contains(tabID) else { return }
@@ -417,11 +448,16 @@ final class TerminalManager: NSObject, ObservableObject {
         var finished: [String] = []
         for (id, view) in terminals where !deadTabs.contains(id) {
             let state = Self.classify(Self.visibleText(of: view))
+            if state == .busy, activity[id] != .busy { busySince[id] = Date() }
+
             // The moment an answer lands: working a second ago, quiet now.
             if activity[id] == .busy, state == .idle {
                 finishedAt[id] = Date()
                 let watched = visibleTabs.contains(id) && NSApp.isActive
                 if !watched { finished.append(id) }
+                let worked = busySince[id].map { Date().timeIntervalSince($0) } ?? 0
+                busySince[id] = nil
+                if !NSApp.isActive { announce(id, after: worked) }
             }
             next[id] = state
 
