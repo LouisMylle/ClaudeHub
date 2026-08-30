@@ -120,13 +120,15 @@ struct ContentView: View {
                                 week: status.week,
                                 account: account,
                                 problem: status.problem ?? status.unverified,
-                                isBusy: status.isChecking)
+                                isBusy: status.isChecking,
+                                updated: status.limitsAt)
         }
         return UsageReadout(session: usage.signedInSession,
                             week: usage.signedInWeek,
                             account: accounts.current?.email ?? "the signed-in account",
                             problem: usage.signedInError,
-                            isBusy: usage.isProbing)
+                            isBusy: usage.isProbing,
+                            updated: usage.signedInAt)
     }
 
     /// What is on screen, and therefore what counts as read. Only while the
