@@ -2,6 +2,10 @@ import Foundation
 import Combine
 
 final class SessionStore: ObservableObject {
+    /// The sessions open in a tab, kept by `TabsModel`. Used to decide whether
+    /// a transcript that holds no messages is a live session or a leftover.
+    static var openSessionIDs: Set<String> = []
+
     @Published var projects: [ClaudeProject] = []
     @Published var isLoading = false
 
@@ -124,9 +128,16 @@ final class SessionStore: ObservableObject {
                     withoutFolder.append(file)
                 }
             }
+            // Only for a session you have open right now. A transcript with no
+            // messages is either a session whose messages are held elsewhere —
+            // worth showing, because it is running in front of you — or the
+            // husk of one that is gone, which `--resume` cannot open and which
+            // has no business coming back into the list after you deleted it.
             if let cwd = found.first?.cwd {
                 for file in withoutFolder {
-                    guard let session = parseSession(file: file, fallbackCwd: cwd) else { continue }
+                    let id = file.deletingPathExtension().lastPathComponent
+                    guard openSessionIDs.contains(id),
+                          let session = parseSession(file: file, fallbackCwd: cwd) else { continue }
                     found.append(session)
                 }
             }

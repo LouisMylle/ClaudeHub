@@ -175,6 +175,7 @@ final class TabsModel: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: index)
         TerminalManager.shared.closeTerminal(for: id)
+        publishOpenSessions()
 
         // Its pane shows whatever else it holds, or folds away when it held
         // nothing else.
@@ -219,6 +220,12 @@ final class TabsModel: ObservableObject {
         tabs.append(tab)
         TerminalManager.shared.tabTitles[tab.id] = tab.title
         show(tab.id)
+        publishOpenSessions()
+    }
+
+    /// What the sidebar needs to know: which conversations are open right now.
+    private func publishOpenSessions() {
+        SessionStore.openSessionIDs = Set(tabs.compactMap(\.sessionID))
     }
 
     // MARK: - Panes
