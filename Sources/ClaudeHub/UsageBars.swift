@@ -13,6 +13,9 @@ struct UsageReadout: Equatable {
     var account: String
     var problem: String?
     var isBusy: Bool
+    /// When these numbers were read. A window that stays open for days can be
+    /// looking at an hour-old figure, and there is no way to tell from a bar.
+    var updated: Date?
 }
 
 /// The 5-hour and weekly limits, always on screen in the sidebar footer.
@@ -31,9 +34,9 @@ struct UsageBars: View {
                     row("5h", readout.session, at: context.date)
                     row("Week", readout.week, at: context.date)
                     // Never a bare percentage: it says whose it is.
-                    Text(readout.account)
+                    Text(readout.account + (isStale ? " · \(age.lowercased().replacingOccurrences(of: "read ", with: "").replacingOccurrences(of: ".", with: ""))" : ""))
                         .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isStale ? Color.pending.opacity(0.85) : Color.secondary.opacity(0.7))
                         .lineLimit(1)
                         .padding(.leading, 39)
                 }
@@ -70,6 +73,13 @@ struct UsageBars: View {
 
     /// An account with nothing to report is not a fault, so it does not get a
     /// warning triangle — only something that actually went wrong does.
+    /// Ten minutes is longer than any of the readers wait, so past that
+    /// something has stopped and the number on screen is history.
+    private var isStale: Bool {
+        guard let updated = readout.updated else { return false }
+        return Date().timeIntervalSince(updated) > 600
+    }
+
     private var showsProblem: Bool {
         readout.problem != nil && !readout.isBusy
     }
@@ -79,8 +89,16 @@ struct UsageBars: View {
         return """
             The limits of \(readout.account) — the account this tab is running as, \
             which is not always the account new sessions start on.
-            Click ↻ to read them now.
+            \(age)  Click ↻ to read them now.
             """
+    }
+
+    private var age: String {
+        guard let updated = readout.updated else { return "Not read yet." }
+        let seconds = Int(Date().timeIntervalSince(updated))
+        if seconds < 90 { return "Read just now." }
+        if seconds < 3_600 { return "Read \(seconds / 60) min ago." }
+        return "Read \(seconds / 3_600) hr ago."
     }
 
     @ViewBuilder

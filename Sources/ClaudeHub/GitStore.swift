@@ -20,6 +20,10 @@ struct RepoStatus: Identifiable, Equatable {
     let ahead: Int
     let behind: Int
     let files: [GitFile]
+    /// When the longest-untouched change was last written. Twelve files from
+    /// this afternoon and twelve from three weeks ago are not the same
+    /// situation, and the count alone cannot tell them apart.
+    let oldestChange: Date?
 
     var id: String { root }
     var name: String { (root as NSString).lastPathComponent }
@@ -43,6 +47,16 @@ struct RepoStatus: Identifiable, Equatable {
     }
 
     var isUnpushed: Bool { upstream == nil }
+
+    /// "6 d", "3 hr", "20 min" — short enough for a sidebar row.
+    var age: String? {
+        guard let oldestChange else { return nil }
+        let seconds = max(0, Int(Date().timeIntervalSince(oldestChange)))
+        if seconds >= 86_400 { return "\(seconds / 86_400) d" }
+        if seconds >= 3_600 { return "\(seconds / 3_600) hr" }
+        if seconds >= 60 { return "\(seconds / 60) min" }
+        return "just now"
+    }
 }
 
 /// Reads `git status` for the projects ClaudeHub already knows about.
@@ -62,13 +76,7 @@ final class GitStore: ObservableObject {
     private var scanning = false
     private let queue = DispatchQueue(label: "be.optimize.claudehub.git", qos: .utility)
 
-    private lazy var gitPath: String = {
-        for candidate in ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"]
-        where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        return "/usr/bin/git"
-    }()
+    private let gitPath = GitStore.binary
 
     /// The repositories worth watching, from the folders the sidebar lists.
     var dirtyRepos: [RepoStatus] { repos.filter(\.isDirty) }
@@ -177,21 +185,38 @@ final class GitStore: ObservableObject {
     }
 
     private static func read(root: String, git: String) -> RepoStatus? {
+        guard let text = run(["status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
+                             in: root, git: git) else { return nil }
+        return parse(text, root: root)
+    }
+
+    /// Runs git in a repository and hands back what it said. Shared with the
+    /// diff view, so there is one place that knows how to call git.
+    static func run(_ arguments: [String], in root: String, git: String = binary) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: git)
         process.currentDirectoryURL = URL(fileURLWithPath: root)
-        process.arguments = ["status", "--porcelain=v2", "--branch", "--untracked-files=normal"]
+        process.arguments = arguments
         let out = Pipe()
         process.standardOutput = out
         process.standardError = Pipe()
 
         do { try process.run() } catch { return nil }
+        // Read before waiting: a large diff fills the pipe and a waiting git
+        // would sit there for ever with nobody draining it.
         let data = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8) else { return nil }
-        return parse(text, root: root)
+        return String(data: data, encoding: .utf8)
     }
+
+    /// Whichever git this machine has.
+    static let binary: String = {
+        for candidate in ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"]
+        where FileManager.default.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+        return "/usr/bin/git"
+    }()
 
     /// `git status --porcelain=v2 --branch`, which states the branch, its
     /// upstream and how far apart they are before listing the files.
@@ -233,7 +258,18 @@ final class GitStore: ObservableObject {
                           upstream: upstream,
                           ahead: ahead,
                           behind: behind,
-                          files: files)
+                          files: files,
+                          oldestChange: oldest(of: files, in: root))
+    }
+
+    /// The earliest write among the changed files. A deleted file has no date
+    /// to read, so it simply does not vote.
+    private static func oldest(of files: [GitFile], in root: String) -> Date? {
+        let fm = FileManager.default
+        return files.compactMap { file -> Date? in
+            let path = (root as NSString).appendingPathComponent(file.path)
+            return (try? fm.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        }.min()
     }
 
     /// The staged column first, then the unstaged one: what the file is, in one
