@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A restart mid-flight may be borrowing the clipboard to hand a session
+        // back its image; quitting is the one thing that would leave it there.
+        TerminalManager.shared.releaseBorrowedClipboard()
         let running = TerminalManager.shared.runningCount
         guard running > 0 else { return .terminateNow }
 

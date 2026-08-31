@@ -27,16 +27,32 @@ final class TerminalManager: NSObject, ObservableObject {
     /// because its token could not be read. Silent fallback is what makes
     /// account switching look broken, so it is remembered and shown.
     private var fellBack: [String: String] = [:]
-    /// Text that was typed but not sent when a tab was restarted, waiting for
-    /// the new session to be ready to take it back.
-    private var pendingDrafts: [String: String] = [:]
+    /// What was in a tab's prompt when it was restarted, and how far putting
+    /// it back has got.
+    private var pendingRestores: [String: Restore] = [:]
+
+    /// A prompt being rebuilt in a restarted session, one move at a time.
+    private struct Restore {
+        var steps: [PasteMemory.Step]
+        var index = 0
+        /// Set while an image sits on the clipboard and ⌃V has gone in: Claude
+        /// Code reads the clipboard itself, so the answer comes back on screen
+        /// rather than from the call.
+        var pastedImageAt: Date?
+        var clipboard: PasteMemory.Clipboard?
+        var imagesBefore = 0
+    }
+
+    /// How long an image gets to arrive before the file path is typed instead.
+    private static let imageWait: TimeInterval = 5
+
     /// Why a tab has not moved to the new account yet.
     private enum SwitchHold {
         /// Mid-answer, or waiting on a permission prompt.
         case busy
-        /// The prompt holds something the screen cannot give back — a paste or
-        /// an image, which Claude Code keeps in memory and only shows as
-        /// `[Pasted text #12 +36 lines]`.
+        /// The prompt holds something neither the screen nor `PasteMemory` can
+        /// give back — an image from Claude in Chrome, say, or a paste from
+        /// before this app was watching.
         case attachment
     }
 
@@ -88,6 +104,22 @@ final class TerminalManager: NSObject, ObservableObject {
                let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
                 terminal.send(txt: "\u{1b}\r")
                 return nil
+            }
+            // ⌃V is Claude Code's own image paste: the keystroke is all the
+            // session gets — it goes and reads the clipboard itself — so this
+            // is the one moment a copy of the image can be kept, which is what
+            // lets the tab move to another account later without losing it.
+            // SwiftTerm's keyDown is not open to overriding, hence here.
+            if event.modifierFlags.contains(.control),
+               !event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers?.lowercased() == "v",
+               let terminal = NSApp.keyWindow?.firstResponder as? DroppableTerminalView,
+               terminal.takesImagePastes,
+               let tabID = terminal.tabID,
+               PasteMemory.clipboardHasImage(),
+               let file = PasteMemory.shared.keepClipboardImage() {
+                PasteMemory.shared.note(.image(file), pastedInto: terminal, tab: tabID)
+                return event
             }
             // ⌘= is what most keyboards give for "bigger" without reaching for
             // shift; the menu item binds ⌘+ for the same action.
@@ -161,6 +193,8 @@ final class TerminalManager: NSObject, ObservableObject {
         if let existing = terminals[tab.id] { return existing }
 
         let view = DroppableTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.tabID = tab.id
+        view.takesImagePastes = tab.isConversation
         view.processDelegate = self
         view.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         applyTheme(to: view)
@@ -273,10 +307,15 @@ final class TerminalManager: NSObject, ObservableObject {
     func relaunch(_ tab: TerminalTab) {
         if let view = terminals.removeValue(forKey: tab.id), !deadTabs.contains(tab.id) {
             // Switching account restarts the session; what you were halfway
-            // through typing should survive that.
-            if let draft = Self.draft(of: view), !Self.holdsAttachment(draft) {
-                pendingDrafts[tab.id] = draft
-            }
+            // through typing should survive that — including the pastes in it,
+            // which are replayed from what went in rather than read off the
+            // screen, where they are only a stand-in.
+            let plan = Self.draft(of: view).flatMap { PasteMemory.shared.plan(for: $0, tab: tab.id) }
+            pendingRestores[tab.id] = plan.map { Restore(steps: $0) }
+            // The stand-ins were numbered by the session that is ending; the
+            // replay binds the new ones. The image files stay: the plan holds
+            // them.
+            PasteMemory.shared.forget(tab: tab.id, deletingImages: false)
             view.terminate()
         }
         launchedProfile[tab.id] = nil
@@ -314,30 +353,20 @@ final class TerminalManager: NSObject, ObservableObject {
     /// What stands in the way of moving this tab right now, if anything.
     ///
     /// A session that is working, or waiting for you to answer a permission
-    /// prompt, is not something to kill. Neither is a prompt holding a paste:
-    /// the text of it lives in Claude Code's memory, and the screen shows only
-    /// a summary of it, so a restart would throw the content away and put the
-    /// summary back in its place as if it were what you wrote.
+    /// prompt, is not something to kill. A prompt holding a paste used to be
+    /// just as untouchable — the content lives in Claude Code's memory and the
+    /// screen shows only a stand-in for it — but a paste this app saw go in is
+    /// remembered and can be put back, so only what `PasteMemory` cannot
+    /// reproduce still holds the tab where it is.
     private func hold(on tab: TerminalTab) -> SwitchHold? {
         guard let view = terminals[tab.id], !deadTabs.contains(tab.id) else { return nil }
-        if let draft = Self.draft(of: view), Self.holdsAttachment(draft) {
+        if let draft = Self.draft(of: view), PasteMemory.shared.plan(for: draft, tab: tab.id) == nil {
             return .attachment
         }
         switch activity(of: tab.id) {
         case .idle, .finished, .stopped, .dead: return nil
         case .busy, .needsInput: return .busy
         }
-    }
-
-    /// A stand-in on screen for content that is not on screen.
-    ///
-    /// Claude Code writes these several ways — `[Pasted text #12 +36 lines]`,
-    /// `[Image #3]`, `[Image from Claude in Chrome]`, `[Image: …]` — so this
-    /// matches the opening rather than the whole shape of each. A prompt that
-    /// happens to contain the literal text only costs this tab a later switch,
-    /// which is the harmless way to be wrong.
-    private static func holdsAttachment(_ draft: String) -> Bool {
-        draft.contains("[Pasted") || draft.contains("[Image")
     }
 
     /// The account a tab will move to once it can, and why it has not yet.
@@ -369,7 +398,8 @@ final class TerminalManager: NSObject, ObservableObject {
         }
         launchedProfile[tabID] = nil
         fellBack[tabID] = nil
-        pendingDrafts[tabID] = nil
+        pendingRestores[tabID] = nil
+        PasteMemory.shared.forget(tab: tabID, deletingImages: true)
         finishedAt[tabID] = nil
         markRead(tabID)
         deferredSwitches[tabID] = nil
@@ -484,17 +514,91 @@ final class TerminalManager: NSObject, ObservableObject {
         }
     }
 
-    /// Types a kept draft back in, once the new session has an empty prompt to
+    /// Puts a kept prompt back, once the new session has an empty prompt to
     /// take it — sending it earlier is how a keystroke gets swallowed by a
     /// session that is still starting.
     private func restoreDrafts() {
-        guard !pendingDrafts.isEmpty else { return }
-        for (id, draft) in pendingDrafts {
-            guard let view = terminals[id], !deadTabs.contains(id) else { continue }
-            guard Self.promptIsEmpty(Self.visibleText(of: view)) else { continue }
-            view.send(txt: draft)
-            pendingDrafts[id] = nil
+        guard !pendingRestores.isEmpty else { return }
+        for id in Array(pendingRestores.keys) {
+            guard let view = terminals[id], !deadTabs.contains(id) else {
+                pendingRestores[id]?.clipboard?.giveBack()
+                pendingRestores[id] = nil
+                continue
+            }
+            advanceRestore(id, in: view)
         }
+    }
+
+    /// Runs the plan until it is done or has to wait.
+    ///
+    /// Typing and pasting go straight in — the order they arrive in is the
+    /// order the session reads them. An image cannot: it goes on the clipboard
+    /// and Claude Code fetches it in its own time, so that step ends the pass
+    /// and the next one picks it up when the prompt says the image landed.
+    private func advanceRestore(_ id: String, in view: LocalProcessTerminalView) {
+        guard var restore = pendingRestores[id] else { return }
+        if restore.index == 0, restore.pastedImageAt == nil,
+           !Self.promptIsEmpty(Self.visibleText(of: view)) { return }
+
+        while restore.index < restore.steps.count {
+            switch restore.steps[restore.index] {
+            case .text(let text):
+                view.send(txt: text)
+                restore.index += 1
+
+            case .paste(let text):
+                PasteMemory.shared.note(.text(text), pastedInto: view, tab: id)
+                Self.paste(text, into: view)
+                restore.index += 1
+
+            case .image(let file):
+                guard let since = restore.pastedImageAt else {
+                    restore.imagesBefore = PasteMemory.imageCount(of: view)
+                    restore.clipboard = PasteMemory.Clipboard.lend(file)
+                    PasteMemory.shared.note(.image(file), pastedInto: view, tab: id)
+                    view.send(txt: "\u{16}")     // ⌃V — Claude Code reads the image itself
+                    restore.pastedImageAt = Date()
+                    pendingRestores[id] = restore
+                    return
+                }
+                let arrived = PasteMemory.imageCount(of: view) > restore.imagesBefore
+                guard arrived || Date().timeIntervalSince(since) > Self.imageWait else {
+                    pendingRestores[id] = restore
+                    return
+                }
+                restore.clipboard?.giveBack()
+                restore.clipboard = nil
+                restore.pastedImageAt = nil
+                // It never landed: the path is the honest second best, and the
+                // session can still read the file from it.
+                if !arrived { view.send(txt: file.path) }
+                restore.index += 1
+            }
+        }
+        pendingRestores[id] = nil
+    }
+
+    /// Gives the clipboard back if a restore is holding it, for the one moment
+    /// there will be no next poll to do it: quitting.
+    func releaseBorrowedClipboard() {
+        for id in Array(pendingRestores.keys) {
+            pendingRestores[id]?.clipboard?.giveBack()
+            pendingRestores[id]?.clipboard = nil
+        }
+    }
+
+    /// Sends text the way ⌘V does, so Claude Code takes it as a paste — which
+    /// is what turns a long one back into `[Pasted text #1 +36 lines]` instead
+    /// of thirty lines of typing, each one sending the prompt.
+    private static func paste(_ text: String, into view: LocalProcessTerminalView) {
+        guard view.getTerminal().bracketedPasteMode else {
+            // No bracketed paste means every newline would send the prompt, so
+            // they go in as the Meta+Enter the prompt reads as a line break.
+            return view.send(txt: text.replacingOccurrences(of: "\n", with: "\u{1b}\r"))
+        }
+        view.send(data: EscapeSequences.bracketedPasteStart[0...])
+        view.send(txt: text)
+        view.send(data: EscapeSequences.bracketedPasteEnd[0...])
     }
 
     /// What the session says about being out of quota, in its own words.

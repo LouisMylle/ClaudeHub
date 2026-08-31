@@ -1232,9 +1232,10 @@ private struct TabChip: View {
                     .background(Color.orange.opacity(0.20), in: Capsule())
                     .help(pending.waitingOnPaste
                           ? """
-                            Waiting: the prompt holds pasted content, which only \
-                            this session has — restarting would lose it. Send or \
-                            clear it and this tab moves to \(pending.account).
+                            Waiting: the prompt holds content only this session \
+                            has — an image from Claude in Chrome, or a paste from \
+                            before ClaudeHub was watching this tab. Send or clear \
+                            it and this tab moves to \(pending.account).
                             """
                           : """
                             Busy right now — this conversation moves to \
