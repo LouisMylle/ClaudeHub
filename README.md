@@ -18,10 +18,9 @@ resumes in an embedded terminal, in the right folder, instantly.
 
 </div>
 
-> Fork of [LouisMylle/ClaudeHub](https://github.com/LouisMylle/ClaudeHub),
-> adding session deletion, one-key ways to start a new session or terminal,
-> instant multi-account switching, always-visible usage limits, and live
-> per-session status dots.
+> Multi-account switching, usage-limit meters, session deletion, split panes,
+> live status dots, and git awareness were contributed by
+> [@gillesravyse](https://github.com/gillesravyse). Thank you!
 
 ## Why
 
@@ -84,7 +83,7 @@ off.
 ### Download
 
 1. Grab the latest `ClaudeHub-x.y.z.zip` from
-   [Releases](https://github.com/gillesravyse/ClaudeHub/releases/latest)
+   [Releases](https://github.com/LouisMylle/ClaudeHub/releases/latest)
 2. Unzip and drag `ClaudeHub.app` into `/Applications`
 3. The app is ad-hoc signed (not notarized), so macOS quarantines it on first
    download. Clear it once:
@@ -99,7 +98,7 @@ ClaudeHub is a front-end for it.
 ### Build from source
 
 ```sh
-git clone https://github.com/gillesravyse/ClaudeHub.git
+git clone https://github.com/LouisMylle/ClaudeHub.git
 cd ClaudeHub
 ./build_app.sh --install   # builds and copies to /Applications
 ```

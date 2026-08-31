@@ -14,9 +14,7 @@ final class UpdateChecker: ObservableObject {
     @Published var errorMessage: String?
 
     private var downloadURL: URL?
-    // This fork's own releases — pointing at upstream would happily replace
-    // this build (delete + new-session) with one that lacks those features.
-    private let releasesAPI = URL(string: "https://api.github.com/repos/gillesravyse/ClaudeHub/releases/latest")!
+    private let releasesAPI = URL(string: "https://api.github.com/repos/LouisMylle/ClaudeHub/releases/latest")!
 
     static var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
