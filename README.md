@@ -18,6 +18,11 @@ resumes in an embedded terminal, in the right folder, instantly.
 
 </div>
 
+> Fork of [LouisMylle/ClaudeHub](https://github.com/LouisMylle/ClaudeHub),
+> adding session deletion, one-key ways to start a new session or terminal,
+> instant multi-account switching, always-visible usage limits, and live
+> per-session status dots.
+
 ## Why
 
 Getting back into a Claude Code session means remembering where it lived,
@@ -33,8 +38,35 @@ off.
 - ⚡ **One-click resume** — opens the session in an embedded terminal
   ([SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)), already in the
   right folder
-- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch.
-  `⌘T` opens a plain shell in the current project's folder
+- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch
+- ✨ **Start a new chat anywhere** — `⌘N` starts a fresh Claude session in the
+  current folder, `⇧⌘N` in any folder you pick; the `+` in the toolbar also
+  lists your projects, and every project row has its own `+`. `⌘T` opens a
+  plain shell in the same folder
+- 👤 **Account switching** — the sidebar footer shows which account (and plan)
+  you are burning limits on. Hit your 5-hour or weekly cap and one click logs
+  you into another: ClaudeHub remembers the addresses you use and hands the
+  login to `claude auth login --email …`, so the real browser flow runs and no
+  credential is ever stored by the app
+- 📊 **Limits always on screen** — two bars in the sidebar footer show your
+  5-hour and weekly usage with a live countdown to the reset, green through
+  red, and they name the account they belong to. `⌘U` still drops `/usage` into
+  the session you are looking at; `/status`, `/context` and `/model` are one
+  menu item away
+- ⚡ **Instant account switching** — save a `claude setup-token` token per
+  account and switch with one click, no browser. The token is checked against
+  the API before it is kept, and the menu tells you what that check
+  established. Picking an account **moves every open conversation to it** and
+  resumes each one where it was; anything mid-answer, or holding a paste you
+  have not sent, moves the moment it safely can rather than being cut off.
+  Tokens travel per session, so **two tabs can still run as two accounts at
+  once** — right-click a session to *Resume as* another account
+- 🟢 **Live status dots** — green when a session waits on you, pulsing amber
+  while Claude is working, pulsing blue when a permission prompt needs an
+  answer. Scan the sidebar to see which session wants you
+- 🗑️ **Delete sessions** — remove a chat (or every chat in a project) for good
+  from the context menu or with `⌫`. Transcript, tool results, and session env
+  go to the **Trash**, so a mis-click is recoverable in Finder
 - 🔌 **MCP manager** — see every configured MCP server across user, project
   (`.mcp.json`), and local scopes; add and remove them from the UI (backed by
   the `claude mcp` CLI, so config stays canonical)
@@ -52,7 +84,7 @@ off.
 ### Download
 
 1. Grab the latest `ClaudeHub-x.y.z.zip` from
-   [Releases](https://github.com/LouisMylle/ClaudeHub/releases/latest)
+   [Releases](https://github.com/gillesravyse/ClaudeHub/releases/latest)
 2. Unzip and drag `ClaudeHub.app` into `/Applications`
 3. The app is ad-hoc signed (not notarized), so macOS quarantines it on first
    download. Clear it once:
@@ -67,7 +99,7 @@ ClaudeHub is a front-end for it.
 ### Build from source
 
 ```sh
-git clone https://github.com/LouisMylle/ClaudeHub.git
+git clone https://github.com/gillesravyse/ClaudeHub.git
 cd ClaudeHub
 ./build_app.sh --install   # builds and copies to /Applications
 ```
@@ -80,7 +112,14 @@ package.
 | Keys | Action |
 | --- | --- |
 | `⇧↩` | Newline in the Claude Code prompt (instead of submitting) |
+| `⌘U` | Usage & limits in the current session (`/usage`) |
+| `⇧⌘L` | Switch account (`claude auth login`) |
+| `⌘N` | New Claude session in the current folder |
+| `⇧⌘N` | New Claude session in a folder you pick |
 | `⌘T` | New shell tab in the current folder |
+| `⌥⌘N` | New window |
+| `⌫` | Delete the selected session (asks first) |
+| `⌘⌫` | Same, from the Edit menu |
 | `⌘W` | Close tab |
 | `⇧⌘W` | Close window |
 | `⌘1`–`⌘9` | Jump to tab |
@@ -98,7 +137,56 @@ subagent sidechains are filtered out. Selecting a session spawns
 zsh -l -c "cd <cwd> && exec claude --resume <session-id>"
 ```
 
-inside a SwiftTerm view that stays alive per tab. MCP servers are read from
+inside a SwiftTerm view that stays alive per tab; a new session is the same
+command without `--resume`. Deleting a chat moves its `.jsonl`, its sidecar
+`<session-id>/` folder, and `~/.claude/session-env/<session-id>` to the Trash —
+nothing is unlinked outright.
+
+Accounts are read with `claude auth status --json` and changed with
+`claude auth login` / `logout` in a visible tab, so ClaudeHub never reads Claude
+Code's own credentials. Note that logging in swaps the account for the `claude`
+CLI everywhere, not just in ClaudeHub; sessions already running keep their
+current credentials until they re-authenticate.
+
+Instant switching works differently, and better: you mint a token with
+`claude setup-token` and hand it to ClaudeHub, which keeps it in your login
+keychain and passes it to sessions you start as that account through
+`CLAUDE_CODE_OAUTH_TOKEN`. Because that is per-process, a tab can run as an
+account you are not signed in as, and several accounts can run side by side —
+which `/login` cannot do, since it changes the one account the CLI uses
+machine-wide. Forgetting a profile deletes the keychain item; revoke the token
+itself at claude.ai to kill it for good.
+
+ClaudeHub is ad-hoc signed, so every build is a new program as far as the
+keychain is concerned and macOS asks permission for the item again after each
+update. The tokens are therefore read once per launch, off the main thread, and
+a refusal is shown rather than swallowed: a tab that could not get its token
+says so on its chip instead of quietly running as whoever is signed in.
+
+A `setup-token` token will not name its account — the OAuth profile endpoint
+refuses it for want of scope — but the API does say which organisation it
+billed a request to. ClaudeHub compares that with the signed-in account's
+organisation, so the account menu can tell you the token really is a different
+account, instead of you having to trust the label you typed.
+
+The limit bars are read two ways, because the two kinds of account are told
+different things. Signed in, ClaudeHub asks the way you would: it starts a
+`claude` session off-screen, sends `/usage` and reads the panel, which runs no
+prompt and costs nothing. A token-authenticated session is never shown those
+windows — Claude Code runs it as "Claude API", and the panel comes back without
+them — so for a saved account the numbers come from the API's own
+`anthropic-ratelimit-unified-*` headers instead, read off a one-token request
+made at most every three minutes, and only while the window is in front.
+
+Which is why the bars say whose numbers they are: a reading taken before the
+token is out of the keychain is the signed-in account's, and a percentage
+without an owner is how one account's usage gets mistaken for another's.
+
+Claude Code exposes no "am I busy" signal, so the status dots read the session's
+own screen: it prints an `esc to interrupt` hint while it works, and permission
+prompts ask `Do you want to …`. Slash commands from the menu are typed into the
+session and only submitted when the prompt is provably empty — otherwise they
+are left for you to send, so a half-typed message is never mangled. MCP servers are read from
 `~/.claude.json` and per-project `.mcp.json` files; all mutations go through
 `claude mcp add` / `claude mcp remove` so ClaudeHub never hand-edits your
 config.

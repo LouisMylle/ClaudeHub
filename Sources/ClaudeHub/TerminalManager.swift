@@ -9,7 +9,50 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Bumped when a process ends/restarts so views and status dots update.
     @Published private(set) var generation = 0
 
+    /// What each tab's terminal is doing right now, refreshed on a timer by
+    /// reading the visible screen — see `TerminalActivity`.
+    @Published private(set) var activity: [String: TerminalActivity] = [:]
+    /// Drives every pulsing dot from one clock: they breathe in step, and no
+    /// row has to mutate its own state while the table is laying it out.
+    @Published private(set) var pulse = false
+    private var activityTimer: Timer?
+
     private var terminals: [String: LocalProcessTerminalView] = [:]
+    /// The saved account each live terminal was actually launched with (nil =
+    /// the signed-in one). A tab keeps the account it started on, so this is
+    /// the only honest answer to "what am I burning limits on in this tab".
+    private var launchedProfile: [String: String] = [:]
+    /// Tabs that wanted a saved account but had to start on the signed-in one
+    /// because its token could not be read. Silent fallback is what makes
+    /// account switching look broken, so it is remembered and shown.
+    private var fellBack: [String: String] = [:]
+    /// Text that was typed but not sent when a tab was restarted, waiting for
+    /// the new session to be ready to take it back.
+    private var pendingDrafts: [String: String] = [:]
+    /// Why a tab has not moved to the new account yet.
+    private enum SwitchHold {
+        /// Mid-answer, or waiting on a permission prompt.
+        case busy
+        /// The prompt holds something the screen cannot give back — a paste or
+        /// an image, which Claude Code keeps in memory and only shows as
+        /// `[Pasted text #12 +36 lines]`.
+        case attachment
+    }
+
+    /// Tabs that could not move when the account changed: they move as soon as
+    /// the reason is gone. Nothing is interrupted, and nothing is lost.
+    private var deferredSwitches: [String: (tab: TerminalTab, account: String, hold: SwitchHold)] = [:]
+    /// Sessions that answered while you were elsewhere. Cleared by looking at
+    /// them, which is the only thing that should clear it.
+    @Published private(set) var unread: Set<String> = []
+    /// Tabs whose account has run out, with what the session said about it.
+    /// The limit belongs to the account that tab started with, which is not
+    /// necessarily the one you are about to start a session on.
+    @Published private(set) var limitNotices: [String: String] = [:]
+    private var finishedAt: [String: Date] = [:]
+    /// The tabs on screen right now, so an answer you watched arrive is not
+    /// then reported as something you missed.
+    var visibleTabs: Set<String> = []
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
@@ -17,6 +60,12 @@ final class TerminalManager: NSObject, ObservableObject {
     private var appearanceObservation: NSKeyValueObservation?
 
     private var keyMonitor: Any?
+
+    /// Terminal text size, shared by every tab and remembered across launches.
+    @Published private(set) var fontSize: CGFloat = {
+        let stored = UserDefaults.standard.double(forKey: "terminalFontSize")
+        return (8.0...32.0).contains(stored) ? CGFloat(stored) : 12
+    }()
 
     override private init() {
         super.init()
@@ -28,14 +77,36 @@ final class TerminalManager: NSObject, ObservableObject {
         // treats as "insert newline" instead of "submit" — matching VS Code's
         // integrated-terminal behavior. Plain terminals can't distinguish
         // Shift+Enter from Enter, so this is intercepted at the event level.
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 36,  // Return
                event.modifierFlags.contains(.shift),
                let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
                 terminal.send(txt: "\u{1b}\r")
                 return nil
             }
+            // ⌘= is what most keyboards give for "bigger" without reaching for
+            // shift; the menu item binds ⌘+ for the same action.
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers == "=" {
+                self?.changeFontSize(by: 1)
+                return nil
+            }
+            // ⌘⌫ is Delete Session in the menu, which means the menu was
+            // taking it from under the cursor while you were typing: one
+            // keystroke away from deleting the conversation instead of the
+            // line you meant. In a terminal it is the line — Ctrl-U, what the
+            // prompt already understands as "clear what I typed" — and the
+            // menu only gets it when the sidebar has the focus.
+            if event.keyCode == 51,                     // Delete / Backspace
+               event.modifierFlags.contains(.command),
+               let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
+                terminal.send(txt: "\u{15}")
+                return nil
+            }
             return event
+        }
+        activityTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            self?.pollActivity()
         }
     }
 
@@ -84,26 +155,56 @@ final class TerminalManager: NSObject, ObservableObject {
     func terminal(for tab: TerminalTab) -> LocalProcessTerminalView {
         if let existing = terminals[tab.id] { return existing }
 
-        let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let view = DroppableTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view.processDelegate = self
-        view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         applyTheme(to: view)
 
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
+        // A profile tab runs as its own account: the CLI reads this instead of
+        // the signed-in credentials, which is what lets two tabs use two
+        // accounts at the same time.
+        launchedProfile[tab.id] = nil
+        fellBack[tab.id] = nil
+        // Deliberately the cached token only: a keychain panel here would
+        // freeze the app mid-layout, and a session that quietly starts on the
+        // wrong account is worse than one that starts late.
+        if !tab.pinnedToSignedIn,
+           let profile = tab.profile ?? TokenStore.activeProfile,
+           let token = TokenStore.cachedToken(for: profile) {
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            launchedProfile[tab.id] = profile
+        } else if !tab.pinnedToSignedIn,
+                  let wanted = tab.profile ?? TokenStore.activeProfile {
+            fellBack[tab.id] = wanted
+        }
         let envArray = env.map { "\($0.key)=\($0.value)" }
 
-        if let sessionID = tab.resumeSessionID {
-            let command = "cd \(ClaudeSession.shellQuote(tab.cwd)) && exec \(ClaudeSession.shellQuote(claudePath)) --resume \(ClaudeSession.shellQuote(sessionID))"
-            view.startProcess(
-                executable: "/bin/zsh",
-                args: ["-l", "-c", command],
-                environment: envArray,
-                execName: nil
-            )
-        } else {
+        switch tab.kind {
+        case .resume(let sessionID):
+            start(view, envArray, "exec \(ClaudeSession.shellQuote(claudePath)) --resume \(ClaudeSession.shellQuote(sessionID))", in: tab.cwd)
+        case .newSession(let sessionID):
+            // ⌘N — a fresh Claude session in the tab's folder, under the id the
+            // tab was opened with, so the sidebar row and this tab are the same
+            // session from the start. Restarting a tab that already has a
+            // transcript resumes it: --session-id refuses an id that is taken.
+            let flag = Self.transcriptExists(sessionID) ? "--resume" : "--session-id"
+            start(view, envArray,
+                  "exec \(ClaudeSession.shellQuote(claudePath)) \(flag) \(ClaudeSession.shellQuote(sessionID))",
+                  in: tab.cwd)
+        case .command(let args):
+            // `claude auth login`, `auth logout` — the shell stays afterwards so
+            // the result is still readable instead of the tab dropping dead.
+            let command = ([claudePath] + args).map(ClaudeSession.shellQuote).joined(separator: " ")
+            start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
+        case .script(let command):
+            // The shell stays afterwards, so the output can be scrolled and
+            // the command run again.
+            start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
+        case .shell:
             // Plain interactive shell in the tab's folder (⌘T)
             view.startProcess(
                 executable: "/bin/zsh",
@@ -119,18 +220,469 @@ final class TerminalManager: NSObject, ObservableObject {
         return view
     }
 
-    /// Restart a tab whose process ended.
+    /// Whether Claude Code has already written a transcript for this session.
+    /// The project folder is derived from the cwd by a scheme we would rather
+    /// not reimplement, so this just looks for the file across all of them.
+    private static func transcriptExists(_ sessionID: String) -> Bool {
+        let fm = FileManager.default
+        let root = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return false
+        }
+        return dirs.contains {
+            fm.fileExists(atPath: $0.appendingPathComponent("\(sessionID).jsonl").path)
+        }
+    }
+
+    /// A login shell gives `claude` the same PATH the user's terminal has.
+    private func start(_ view: LocalProcessTerminalView, _ env: [String], _ command: String, in cwd: String) {
+        view.startProcess(
+            executable: "/bin/zsh",
+            args: ["-l", "-c", "cd \(ClaudeSession.shellQuote(cwd)) && \(command)"],
+            environment: env,
+            execName: nil
+        )
+    }
+
+    /// The account this tab runs as: the one it launched with once it is
+    /// running, the one it would launch with before that.
+    func profile(of tab: TerminalTab) -> String? {
+        if terminals[tab.id] != nil { return launchedProfile[tab.id] }
+        if tab.pinnedToSignedIn { return nil }
+        return tab.profile ?? TokenStore.activeProfile
+    }
+
+    /// Whether the tab is already running, so its account is settled rather
+    /// than a prediction.
+    func hasLaunched(_ tabID: String) -> Bool { terminals[tabID] != nil }
+
+    /// The saved account this tab was meant to run as but could not.
+    func fallbackAccount(of tabID: String) -> String? { fellBack[tabID] }
+
+    /// Restart a tab, whether its process ended or is still running.
+    ///
+    /// A live process is stopped first: dropping the reference would leave it
+    /// running on the old account, still holding that token, invisible.
     func relaunch(_ tab: TerminalTab) {
-        terminals.removeValue(forKey: tab.id)
+        if let view = terminals.removeValue(forKey: tab.id), !deadTabs.contains(tab.id) {
+            // Switching account restarts the session; what you were halfway
+            // through typing should survive that.
+            if let draft = Self.draft(of: view), !Self.holdsAttachment(draft) {
+                pendingDrafts[tab.id] = draft
+            }
+            view.terminate()
+        }
+        launchedProfile[tab.id] = nil
+        fellBack[tab.id] = nil
         deadTabs.remove(tab.id)
         generation += 1
+    }
+
+    /// Moves every open conversation onto the account that is active now.
+    ///
+    /// Switching account used to apply only to what you opened next, which
+    /// meant the window could show four tabs under one account label while
+    /// three of them ran as somebody else. A conversation survives this: it
+    /// resumes from its transcript, on the new account. Shells and one-shot
+    /// `claude auth` tabs are left alone — restarting those would throw away
+    /// what you were doing in them, and they are not conversations.
+    ///
+    /// Only the visible tab starts again immediately; the rest start as you
+    /// come back to them, which is also when they would have cost anything.
+    @discardableResult
+    func restartConversations(_ tabs: [TerminalTab]) -> Int {
+        let target = TokenStore.activeProfile ?? "the signed-in account"
+        var moved = 0
+        for tab in tabs where tab.isConversation {
+            if let hold = hold(on: tab) {
+                deferredSwitches[tab.id] = (tab, target, hold)
+            } else {
+                relaunch(tab)
+                moved += 1
+            }
+        }
+        return moved
+    }
+
+    /// What stands in the way of moving this tab right now, if anything.
+    ///
+    /// A session that is working, or waiting for you to answer a permission
+    /// prompt, is not something to kill. Neither is a prompt holding a paste:
+    /// the text of it lives in Claude Code's memory, and the screen shows only
+    /// a summary of it, so a restart would throw the content away and put the
+    /// summary back in its place as if it were what you wrote.
+    private func hold(on tab: TerminalTab) -> SwitchHold? {
+        guard let view = terminals[tab.id], !deadTabs.contains(tab.id) else { return nil }
+        if let draft = Self.draft(of: view), Self.holdsAttachment(draft) {
+            return .attachment
+        }
+        switch activity(of: tab.id) {
+        case .idle, .finished, .stopped, .dead: return nil
+        case .busy, .needsInput: return .busy
+        }
+    }
+
+    /// A stand-in on screen for content that is not on screen.
+    ///
+    /// Claude Code writes these several ways — `[Pasted text #12 +36 lines]`,
+    /// `[Image #3]`, `[Image from Claude in Chrome]`, `[Image: …]` — so this
+    /// matches the opening rather than the whole shape of each. A prompt that
+    /// happens to contain the literal text only costs this tab a later switch,
+    /// which is the harmless way to be wrong.
+    private static func holdsAttachment(_ draft: String) -> Bool {
+        draft.contains("[Pasted") || draft.contains("[Image")
+    }
+
+    /// The account a tab will move to once it can, and why it has not yet.
+    func pendingSwitch(of tabID: String) -> (account: String, waitingOnPaste: Bool)? {
+        guard let pending = deferredSwitches[tabID] else { return nil }
+        return (pending.account, pending.hold == .attachment)
+    }
+
+    /// Moves the tabs that were busy when the account changed, now that they
+    /// are not.
+    private func applyDeferredSwitches() {
+        guard !deferredSwitches.isEmpty else { return }
+        for (id, pending) in deferredSwitches {
+            guard terminals[id] != nil else {
+                deferredSwitches[id] = nil
+                continue
+            }
+            // The same test that held it back, asked again: sent the paste, or
+            // finished the answer, and it can move.
+            guard hold(on: pending.tab) == nil else { continue }
+            deferredSwitches[id] = nil
+            relaunch(pending.tab)
+        }
     }
 
     func closeTerminal(for tabID: String) {
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
             view.terminate()
         }
+        launchedProfile[tabID] = nil
+        fellBack[tabID] = nil
+        pendingDrafts[tabID] = nil
+        finishedAt[tabID] = nil
+        markRead(tabID)
+        deferredSwitches[tabID] = nil
         deadTabs.remove(tabID)
+        generation += 1
+    }
+
+    // MARK: - Activity
+
+    func activity(of tabID: String) -> TerminalActivity {
+        if deadTabs.contains(tabID) { return .dead }
+        guard terminals[tabID] != nil else { return .stopped }
+        let state = activity[tabID] ?? .idle
+        // Unread only colours a session that is otherwise sitting quiet: a
+        // question or a new answer coming in outranks it.
+        if state == .idle, unread.contains(tabID) { return .finished }
+        return state
+    }
+
+    /// When a session last stopped working, for "finished 3 min ago".
+    func finishedAt(_ tabID: String) -> Date? { finishedAt[tabID] }
+
+    /// Looking at a session is what marks it read.
+    func markRead(_ tabID: String) {
+        guard unread.contains(tabID) else { return }
+        unread.remove(tabID)
+        updateDockBadge()
+    }
+
+    func markRead(_ tabIDs: some Sequence<String>) {
+        let seen = unread.intersection(tabIDs)
+        guard !seen.isEmpty else { return }
+        unread.subtract(seen)
+        updateDockBadge()
+    }
+
+    /// The count on the app icon: the whole point is to be readable with
+    /// ClaudeHub in the background, which is exactly when it matters.
+    private func updateDockBadge() {
+        NSApp.dockTile.badgeLabel = unread.isEmpty ? nil : String(unread.count)
+    }
+
+    /// Claude Code has no machine-readable "am I busy" channel, so this reads
+    /// what the session is showing: while it works it prints an
+    /// "esc to interrupt" hint, and permission prompts ask "Do you want to …".
+    private func pollActivity() {
+        guard !terminals.isEmpty else {
+            if !activity.isEmpty { activity = [:] }
+            return
+        }
+        var next: [String: TerminalActivity] = [:]
+        var finished: [String] = []
+        for (id, view) in terminals where !deadTabs.contains(id) {
+            let state = Self.classify(Self.visibleText(of: view))
+            // The moment an answer lands: working a second ago, quiet now.
+            if activity[id] == .busy, state == .idle {
+                finishedAt[id] = Date()
+                let watched = visibleTabs.contains(id) && NSApp.isActive
+                if !watched { finished.append(id) }
+            }
+            next[id] = state
+
+            // "You've hit your session limit · resets 2:40am" — the one message
+            // that explains a session that has gone quiet and will not answer.
+            let notice = Self.limitNotice(in: Self.visibleText(of: view))
+            if limitNotices[id] != notice { limitNotices[id] = notice }
+        }
+        if next != activity { activity = next }
+        if !finished.isEmpty {
+            unread.formUnion(finished)
+            updateDockBadge()
+        }
+        applyDeferredSwitches()
+        restoreDrafts()
+        if next.values.contains(where: \.pulses) {
+            pulse.toggle()
+        } else if pulse {
+            pulse = false
+        }
+    }
+
+    /// Types a kept draft back in, once the new session has an empty prompt to
+    /// take it — sending it earlier is how a keystroke gets swallowed by a
+    /// session that is still starting.
+    private func restoreDrafts() {
+        guard !pendingDrafts.isEmpty else { return }
+        for (id, draft) in pendingDrafts {
+            guard let view = terminals[id], !deadTabs.contains(id) else { continue }
+            guard Self.promptIsEmpty(Self.visibleText(of: view)) else { continue }
+            view.send(txt: draft)
+            pendingDrafts[id] = nil
+        }
+    }
+
+    /// What the session says about being out of quota, in its own words.
+    private static func limitNotice(in screen: String) -> String? {
+        let markers = ["hit your session limit", "hit your usage limit",
+                       "hit your weekly limit", "usage limit reached"]
+        guard let line = screen.split(separator: "\n").last(where: { line in
+            markers.contains { line.contains($0) }
+        }) else { return nil }
+        return line.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// "resets 2:40am" out of the whole sentence, for a badge with no room.
+    static func resetTime(in notice: String) -> String? {
+        guard let range = notice.range(of: "resets ", options: .caseInsensitive) else { return nil }
+        let rest = notice[range.upperBound...]
+        let time = rest.prefix { !$0.isWhitespace }
+        return time.isEmpty ? nil : String(time)
+    }
+
+    private static func classify(_ screen: String) -> TerminalActivity {
+        if screen.contains("esc to interrupt") { return .busy }
+        if screen.contains("Do you want to") { return .needsInput }
+        return .idle
+    }
+
+    /// The rows currently on screen, lowest-cost snapshot SwiftTerm offers.
+    private static func visibleText(of view: LocalProcessTerminalView) -> String {
+        let terminal = view.getTerminal()
+        var lines: [String] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            lines.append(readable(line.translateToString(trimRight: true)))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// A cell that was never written comes back as NUL, not as a space —
+    /// SwiftTerm hands you `Character(Unicode.Scalar(0))` for an empty cell.
+    /// On screen that gap is a space, and everything that reads the screen
+    /// means the space: a prompt read as text otherwise loses every gap
+    /// between words, and typing it back sends NULs the terminal drops.
+    private static func readable(_ text: String) -> String {
+        text.replacingOccurrences(of: "\0", with: " ")
+    }
+
+    /// The login URL a `claude auth` tab prints, rejoined.
+    ///
+    /// The terminal hard-wraps it across three lines with no hyphen, and
+    /// cmd-clicking it just opens the browser — so this stitches the pieces
+    /// back together for the clipboard. Continuation lines are the ones with
+    /// no spaces in them.
+    func signInURL(in tabID: String) -> String? {
+        guard let view = terminals[tabID] else { return nil }
+        let lines = Self.visibleText(of: view)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let index = lines.lastIndex(where: { $0.contains("https://") }),
+              let start = lines[index].range(of: "https://") else { return nil }
+
+        var url = String(lines[index][start.lowerBound...]).trimmingCharacters(in: .whitespaces)
+        var next = index + 1
+        while next < lines.count {
+            let line = lines[next].trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.contains(" ") else { break }
+            url += line
+            next += 1
+        }
+        return url.count > 30 ? url : nil
+    }
+
+    // MARK: - Find
+
+    /// Searches the tab's scrollback, selects the match and scrolls to it.
+    /// Returns "3 of 12" for the field's counter.
+    @discardableResult
+    func find(_ term: String, in tabID: String, forward: Bool = true) -> (index: Int, total: Int) {
+        guard let view = terminals[tabID], !term.isEmpty else { return (0, 0) }
+        if forward {
+            view.findNext(term)
+        } else {
+            view.findPrevious(term)
+        }
+        return view.searchMatchSummary(term)
+    }
+
+    /// Typing in the field searches from the top again, rather than walking
+    /// forward from wherever the last keystroke happened to land.
+    @discardableResult
+    func findFromStart(_ term: String, in tabID: String) -> (index: Int, total: Int) {
+        terminals[tabID]?.clearSearch()
+        return find(term, in: tabID, forward: true)
+    }
+
+    func clearFind(in tabID: String) {
+        terminals[tabID]?.clearSearch()
+    }
+
+    // MARK: - Slash commands
+
+    /// Types a slash command into a session. Only presses Return when the
+    /// prompt is provably empty — appending to half-typed text and submitting
+    /// it would send the user's own words to Claude by accident.
+    /// Returns whether it was submitted.
+    @discardableResult
+    func sendSlashCommand(_ command: String, to tabID: String) -> Bool {
+        guard let view = terminals[tabID], !deadTabs.contains(tabID) else { return false }
+        let submit = activity(of: tabID) == .idle
+            && Self.promptIsEmpty(Self.visibleText(of: view))
+        view.send(txt: submit ? command + "\r" : command)
+        view.window?.makeFirstResponder(view)
+        return submit
+    }
+
+    /// The prompt renders as `❯ …`, or as `│ > …` inside a box in older
+    /// versions. Returns where it is and what is on it.
+    private static func promptLine(_ screen: String) -> (index: Int, text: String, lines: [String])? {
+        let lines = screen.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        for index in lines.indices.reversed() {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            let unboxed = trimmed.hasPrefix("\u{2502}")     // │
+                ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                : trimmed
+            guard unboxed.hasPrefix("\u{276F}") || unboxed.hasPrefix(">") else { continue }  // ❯
+            let text = unboxed.dropFirst()
+                .trimmingCharacters(in: CharacterSet(charactersIn: " \u{2502}"))
+            return (index, text, lines)
+        }
+        return nil
+    }
+
+    /// The hint an empty prompt shows — `Try "write a test for <filepath>"` —
+    /// which is on screen but is not something anybody typed.
+    private static func isPlaceholder(_ text: String) -> Bool {
+        text.hasPrefix("Try \"") || text.hasPrefix("Try \u{201C}")
+    }
+
+    /// An empty prompt has nothing on it but the hint. Anything we cannot read
+    /// confidently counts as "not empty".
+    private static func promptIsEmpty(_ screen: String) -> Bool {
+        guard let prompt = promptLine(screen) else { return false }
+        return prompt.text.isEmpty || isPlaceholder(prompt.text)
+    }
+
+    /// What has been typed into the prompt but not sent yet, exactly as typed.
+    ///
+    /// Long input wraps onto the rows under the caret, and the terminal knows
+    /// which of those are a continuation of the row above rather than a line of
+    /// their own. Using that, a wrapped sentence is rejoined with nothing in
+    /// between — no invented spaces — and a real newline is put back as the
+    /// Meta+Enter the prompt takes for one.
+    static func draft(of view: LocalProcessTerminalView) -> String? {
+        let terminal = view.getTerminal()
+        var rows: [(text: String, wrapped: Bool)] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else {
+                rows.append(("", false))
+                continue
+            }
+            // Not trimmed: at a wrap, a trailing space is content, and dropping
+            // it is how "hello world" comes back as "helloworld".
+            rows.append((readable(line.translateToString(trimRight: false)), line.isWrapped))
+        }
+
+        guard let start = rows.indices.reversed().first(where: { isPromptRow(rows[$0].text) }),
+              let head = promptText(rows[start].text) else { return nil }
+
+        var lines = [head]
+        for row in (start + 1)..<rows.count {
+            let trimmed = rows[row].text.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || isFrame(trimmed) { break }
+            if rows[row].wrapped {
+                lines[lines.count - 1] += rows[row].text
+            } else {
+                lines.append(rows[row].text)
+            }
+        }
+
+        let text = lines
+            .map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            .joined(separator: "\u{1b}\r")     // Meta+Enter: a newline, not a send
+        guard !text.isEmpty, !isPlaceholder(text) else { return nil }
+        return text
+    }
+
+    private static func isPromptRow(_ row: String) -> Bool {
+        let trimmed = row.trimmingCharacters(in: .whitespaces)
+        let unboxed = trimmed.hasPrefix("\u{2502}")
+            ? String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            : trimmed
+        return unboxed.hasPrefix("\u{276F}") || unboxed.hasPrefix(">")
+    }
+
+    /// The row's content with the caret taken off the front, right-hand padding
+    /// left alone.
+    private static func promptText(_ row: String) -> String? {
+        var text = Substring(row).drop { $0 == " " }
+        if text.first == "\u{2502}" { text = text.dropFirst().drop { $0 == " " } }
+        guard let caret = text.first, caret == "\u{276F}" || caret == ">" else { return nil }
+        text = text.dropFirst()
+        if text.first == " " { text = text.dropFirst() }
+        return String(text)
+    }
+
+    /// The rules, status line and hints drawn under the input box.
+    private static func isFrame(_ line: String) -> Bool {
+        guard let first = line.first else { return true }
+        return "\u{2500}\u{256D}\u{2570}\u{23F5}\u{26A0}?".contains(first)   // ─ ╭ ╰ ⏵ ⚠ ?
+    }
+
+    // MARK: - Text size
+
+    func changeFontSize(by delta: CGFloat) { setFontSize(fontSize + delta) }
+
+    func resetFontSize() { setFontSize(12) }
+
+    private func setFontSize(_ size: CGFloat) {
+        let clamped = min(max(size, 8), 32)
+        guard clamped != fontSize else { return }
+        fontSize = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: "terminalFontSize")
+
+        let font = NSFont.monospacedSystemFont(ofSize: clamped, weight: .regular)
+        for view in terminals.values {
+            view.font = font
+            view.needsLayout = true
+            view.needsDisplay = true
+        }
         generation += 1
     }
 

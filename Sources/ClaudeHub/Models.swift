@@ -4,11 +4,25 @@ struct ClaudeSession: Identifiable, Hashable {
     let id: String          // session UUID (jsonl filename)
     let title: String
     let cwd: String
-    let lastModified: Date
+    /// When Claude last answered here — read from the transcript, not from
+    /// the file's mtime, which every open, resume or background pass bumps.
+    let lastActivity: Date
     let fileURL: URL
 
     var resumeCommand: String {
         "cd \(ClaudeSession.shellQuote(cwd)) && claude --resume \(id)"
+    }
+
+    /// Everything Claude Code keeps for this session: the transcript, the
+    /// sidecar folder next to it (tool results), and the session's env dir.
+    /// Deleting a chat should not leave these behind.
+    var artifactURLs: [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            fileURL,
+            fileURL.deletingPathExtension(),                                  // <uuid>/ sidecar
+            home.appendingPathComponent(".claude/session-env/\(id)"),
+        ]
     }
 
     static func shellQuote(_ s: String) -> String {
@@ -22,5 +36,5 @@ struct ClaudeProject: Identifiable, Hashable {
     let path: String
     var sessions: [ClaudeSession]
 
-    var lastModified: Date { sessions.map(\.lastModified).max() ?? .distantPast }
+    var lastActivity: Date { sessions.map(\.lastActivity).max() ?? .distantPast }
 }
