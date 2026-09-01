@@ -755,6 +755,13 @@ final class TerminalManager: NSObject, ObservableObject {
         terminals[tabID]?.clearSearch()
     }
 
+    /// True while the tab's program runs on the alternate screen — Claude Code
+    /// in fullscreen mode, say — where the terminal holds only the visible rows
+    /// and nothing scrolled away.
+    func isOnAlternateScreen(_ tabID: String) -> Bool {
+        terminals[tabID]?.getTerminal().isCurrentBufferAlternate ?? false
+    }
+
     // MARK: - Slash commands
 
     /// Types a slash command into a session. Only presses Return when the

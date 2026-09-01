@@ -104,7 +104,7 @@ struct ContentView: View {
         findMatches = (0, 0)
         findResults = []
         findSelected = nil
-        jumpMissed = false
+        jumpNote = nil
     }
 
     /// Scrolls the terminal to a transcript result, when it is still in the
@@ -112,7 +112,7 @@ struct ContentView: View {
     /// on resume, so an older message has nowhere to jump to — the result row
     /// shows the whole message instead and says so.
     private func jump(toResult index: Int?) {
-        jumpMissed = false
+        jumpNote = nil
         guard let index, findResults.indices.contains(index),
               let id = tabs.activeTabID else { return }
         // The transcript holds markdown; the terminal shows it rendered — no
@@ -127,7 +127,11 @@ struct ContentView: View {
             guard snippet.count >= min(length, findTerm.count) else { continue }
             if terminalManager.findFromStart(snippet, in: id).total > 0 { return }
         }
-        jumpMissed = true
+        // Fullscreen Claude Code draws on the alternate screen, which has no
+        // scrollback: only what is on screen exists in the terminal at all.
+        jumpNote = terminalManager.isOnAlternateScreen(id)
+            ? "Not on screen right now (fullscreen Claude Code keeps only the visible part in the terminal) — shown here instead"
+            : "Older than the terminal's scrollback — shown here instead"
     }
 
     /// A transcript line with its markdown taken off, the way Claude Code
@@ -566,8 +570,8 @@ struct ContentView: View {
     @State private var findMatches = (index: 0, total: 0)
     @State private var findResults: [TranscriptMatch] = []
     @State private var findSelected: Int?
-    /// The selected result is older than the terminal's scrollback.
-    @State private var jumpMissed = false
+    /// Why the selected result could not be jumped to, when it could not.
+    @State private var jumpNote: String?
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -598,6 +602,15 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            if Self.vsCodeURL != nil {
+                Button {
+                    openInVSCode(tabs.currentFolder)
+                } label: {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                }
+                .help("Open \(TabsModel.folderName(tabs.currentFolder)) in VS Code")
+            }
+
             Button {
                 if let session = activeGraphSession {
                     openGraph(session, alongside: true)
@@ -666,7 +679,7 @@ struct ContentView: View {
                             matches: findMatches,
                             results: findResults,
                             selected: $findSelected,
-                            jumpMissed: jumpMissed,
+                            jumpNote: jumpNote,
                             searchesTranscript: activeTranscript != nil,
                             search: searchFromStart,
                             step: step,
@@ -990,8 +1003,8 @@ private struct FindBar: View {
     let matches: (index: Int, total: Int)
     let results: [TranscriptMatch]
     @Binding var selected: Int?
-    /// The selected result could not be found in the terminal.
-    let jumpMissed: Bool
+    /// Why the selected result could not be found in the terminal, if it could not.
+    let jumpNote: String?
     let searchesTranscript: Bool
     let search: () -> Void
     let step: (Bool) -> Void
@@ -1091,8 +1104,8 @@ private struct FindBar: View {
                 .font(.system(size: 11))
                 .lineLimit(isSelected ? 14 : 2)
                 .textSelection(.enabled)
-            if isSelected && jumpMissed {
-                Text("Older than the terminal's scrollback — shown here instead")
+            if isSelected, let jumpNote {
+                Text(jumpNote)
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
             }
