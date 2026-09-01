@@ -8,6 +8,7 @@ enum TerminalTabKind: Hashable {
     case shell               // plain login shell
     case command([String])   // one-shot `claude <args…>`, e.g. auth login
     case script(String)      // one-shot shell command, e.g. `git diff`
+    case diff(String)        // the changes in a repository, side by side
 }
 
 struct TerminalTab: Identifiable, Hashable {
@@ -30,7 +31,7 @@ struct TerminalTab: Identifiable, Hashable {
     var sessionID: String? {
         switch kind {
         case .resume(let id), .newSession(let id): return id
-        case .shell, .command, .script: return nil
+        case .shell, .command, .script, .diff: return nil
         }
     }
 
@@ -44,7 +45,7 @@ struct TerminalTab: Identifiable, Hashable {
     var isConversation: Bool {
         switch kind {
         case .resume, .newSession: return true
-        case .shell, .command, .script: return false
+        case .shell, .command, .script, .diff: return false
         }
     }
 }
@@ -128,6 +129,18 @@ final class TabsModel: ObservableObject {
         ))
     }
 
+    /// The repository's changes, side by side, in a tab of their own. One tab
+    /// per repository: opening it twice means you want to look again, not to
+    /// have two of them.
+    func openDiff(root: String) {
+        let id = "diff-\(root)"
+        if tabs.contains(where: { $0.id == id }) { return show(id) }
+        append(TerminalTab(id: id,
+                           title: "Diff · \((root as NSString).lastPathComponent)",
+                           cwd: root,
+                           kind: .diff(root)))
+    }
+
     /// Runs a shell command in its own tab and leaves the shell behind, so the
     /// output stays readable — `git diff` for a repository, and nothing else so
     /// far. Reusing the tab per folder keeps them from piling up.
@@ -173,6 +186,7 @@ final class TabsModel: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: index)
         TerminalManager.shared.closeTerminal(for: id)
+        publishOpenSessions()
 
         // Its pane shows whatever else it holds, or folds away when it held
         // nothing else.
@@ -208,13 +222,21 @@ final class TabsModel: ObservableObject {
                   let title = titles[sessionID] else { continue }
             tabs[index].title = tabs[index].profile
                 .map { "\(title) · \(Self.shortLabel($0))" } ?? title
+            TerminalManager.shared.tabTitles[tabs[index].id] = tabs[index].title
             tabs[index].hasProvisionalTitle = false
         }
     }
 
     private func append(_ tab: TerminalTab) {
         tabs.append(tab)
+        TerminalManager.shared.tabTitles[tab.id] = tab.title
         show(tab.id)
+        publishOpenSessions()
+    }
+
+    /// What the sidebar needs to know: which conversations are open right now.
+    private func publishOpenSessions() {
+        SessionStore.openSessionIDs = Set(tabs.compactMap(\.sessionID))
     }
 
     // MARK: - Panes

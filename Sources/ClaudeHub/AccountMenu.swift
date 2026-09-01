@@ -283,9 +283,7 @@ struct AccountItems: View {
         let name = "\(current.email) (signed in)"
         guard let limits = usage.signedInSummary else { return "\u{26AA}  \(name)" }
         let dot = AccountStore.dot(session: usage.signedInSession, week: usage.signedInWeek)
-        let best = roomiest == .signedIn && accounts.activeProfile != nil
-            ? "   \u{2190} most room"
-            : ""
+        let best = roomiest == .signedIn ? "   \u{2190} most room" : ""
         return "\(dot)  \(name) — \(limits)\(best)"
     }
 
@@ -305,9 +303,10 @@ struct AccountItems: View {
         guard let limits = accounts.limitsSummary(for: profile) else {
             return "\(accounts.dot(for: profile))  \(name)"
         }
-        let best = roomiest == .saved(profile) && profile != accounts.activeProfile
-            ? "   \u{2190} most room"
-            : ""
+        // Marked even when it is the account you are already on: an absent
+        // arrow then means one thing only — not enough is known yet — instead
+        // of standing for both "you are on the best one" and "no idea".
+        let best = roomiest == .saved(profile) ? "   \u{2190} most room" : ""
         return "\(accounts.dot(for: profile))  \(name) — \(limits)\(best)"
     }
 

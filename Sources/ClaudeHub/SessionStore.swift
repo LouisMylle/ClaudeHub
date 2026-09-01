@@ -2,6 +2,10 @@ import Foundation
 import Combine
 
 final class SessionStore: ObservableObject {
+    /// The sessions open in a tab, kept by `TabsModel`. Used to decide whether
+    /// a transcript that holds no messages is a live session or a leftover.
+    static var openSessionIDs: Set<String> = []
+
     @Published var projects: [ClaudeProject] = []
     @Published var isLoading = false
 
@@ -108,8 +112,36 @@ final class SessionStore: ObservableObject {
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
             ) else { continue }
 
+            // Two passes. A session that has only just started, or whose
+            // messages are held elsewhere by a bridge, writes a transcript with
+            // its state and no messages — and so no `cwd`, which is what a
+            // session is filed under. Dropping those is why a brand-new session
+            // could sit in a tab, running, and never appear in this list. Its
+            // neighbours in the same folder know the cwd, so the second pass
+            // borrows it.
+            var found: [ClaudeSession] = []
+            var withoutFolder: [URL] = []
             for file in files where file.pathExtension == "jsonl" {
-                guard let session = parseSession(file: file) else { continue }
+                if let session = parseSession(file: file) {
+                    found.append(session)
+                } else {
+                    withoutFolder.append(file)
+                }
+            }
+            // Only for a session you have open right now. A transcript with no
+            // messages is either a session whose messages are held elsewhere —
+            // worth showing, because it is running in front of you — or the
+            // husk of one that is gone, which `--resume` cannot open and which
+            // has no business coming back into the list after you deleted it.
+            if let cwd = found.first?.cwd {
+                for file in withoutFolder {
+                    let id = file.deletingPathExtension().lastPathComponent
+                    guard openSessionIDs.contains(id),
+                          let session = parseSession(file: file, fallbackCwd: cwd) else { continue }
+                    found.append(session)
+                }
+            }
+            for session in found {
                 byCwd[session.cwd, default: []].append(session)
             }
         }
@@ -140,7 +172,7 @@ final class SessionStore: ObservableObject {
 
     // MARK: - JSONL parsing
 
-    private static func parseSession(file: URL) -> ClaudeSession? {
+    private static func parseSession(file: URL, fallbackCwd: String? = nil) -> ClaudeSession? {
         let id = file.deletingPathExtension().lastPathComponent
         // Session transcripts are named by UUID; skip anything else (e.g. agent sidechains)
         guard UUID(uuidString: id) != nil else { return nil }
@@ -172,14 +204,19 @@ final class SessionStore: ObservableObject {
         // Sidechain (subagent) transcripts live alongside main sessions in old versions — skip them.
         if firstJSONValue(in: head, key: "isSidechain") == "true" { return nil }
 
-        // cwd is required to resume in the right folder; files without one are
-        // bridge stubs or empty shells — not useful in the list.
-        guard let cwd = firstJSONString(in: head, key: "cwd"), !cwd.isEmpty else { return nil }
+        // cwd is what a session is filed under. Without one in the file, the
+        // folder it sits in speaks for it — but only for a session that has
+        // something to show for itself.
+        let named = firstJSONString(in: head, key: "cwd").flatMap { $0.isEmpty ? nil : $0 }
+        guard let cwd = named ?? fallbackCwd else { return nil }
 
         let title = lastJSONString(in: tail, key: "aiTitle")
             ?? lastJSONString(in: head, key: "aiTitle")
             ?? firstUserPrompt(in: head)
-            ?? "Session \(id.prefix(8))"
+        guard let title = title ?? (named != nil ? "Session \(id.prefix(8))" : nil) else {
+            // No folder of its own and nothing to call it: an empty shell.
+            return nil
+        }
 
         // The mtime says when the file was last *touched*, which is not the
         // same question: opening or resuming a session rewrites its transcript,

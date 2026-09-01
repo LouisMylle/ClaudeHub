@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 extension Notification.Name {
     /// Menu → "New Session in Folder…": the folder picker lives in the window
@@ -14,10 +15,35 @@ extension Notification.Name {
     static let findPreviousMatch = Notification.Name("ClaudeHub.findPreviousMatch")
     /// The account sessions run as changed, so the limits belong to someone else now.
     static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
+    /// A notification banner was clicked: bring that session forward.
+    static let focusTab = Notification.Name("ClaudeHub.focusTab")
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Asked for once, and only used for "your session finished while you
+        // were elsewhere" — declined is a perfectly good answer, the dot in the
+        // sidebar and the count on the icon say the same thing.
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .badge]) { _, _ in }
+    }
+
+    /// Clicking the banner opens the session it came from.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completion: @escaping () -> Void) {
+        if let tab = response.notification.request.content.userInfo["tab"] as? String {
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .focusTab, object: tab)
+        }
+        completion()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A restart mid-flight may be borrowing the clipboard to hand a session
+        // back its image; quitting is the one thing that would leave it there.
+        TerminalManager.shared.releaseBorrowedClipboard()
         let running = TerminalManager.shared.runningCount
         guard running > 0 else { return .terminateNow }
 
