@@ -4,3 +4,7 @@ dist/
 .swiftpm/
 .DS_Store
 Resources/AppIcon.iconset/
+
+# Syncthing leaves these next to the file it could not merge; two copies of
+# one Swift file is a build that cannot compile, not something to commit.
+*sync-conflict-*

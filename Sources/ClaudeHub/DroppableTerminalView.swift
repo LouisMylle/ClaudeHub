@@ -54,6 +54,25 @@ final class DroppableTerminalView: LocalProcessTerminalView {
 
     // MARK: Drops
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.paths(in: sender).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        Self.paths(in: sender).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = Self.paths(in: sender)
+        guard !paths.isEmpty else { return super.performDragOperation(sender) }
+
+        // A trailing space, so dropping two files in a row does not run them
+        // together, and so you can keep typing straight after one.
+        send(txt: paths.map(Self.escaped).joined(separator: " ") + " ")
+        window?.makeFirstResponder(self)
+        return true
+    }
+
     private static func paths(in sender: NSDraggingInfo) -> [String] {
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
