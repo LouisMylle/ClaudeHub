@@ -586,6 +586,9 @@ struct ContentView: View {
         Button("New Session in This Folder") { newSession(in: session.cwd) }
         Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
         Divider()
+        Button("Watch as Flow Graph") { openGraph(session, alongside: false) }
+        Button("Watch Alongside") { openGraph(session, alongside: true) }
+        Divider()
         if Self.vsCodeURL != nil {
             Button("Open in VS Code") { openInVSCode(session.cwd) }
         }
@@ -676,6 +679,26 @@ struct ContentView: View {
     /// nil when VS Code is not installed, which hides the menu item.
     private static let vsCodeURL: URL? =
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode")
+
+    /// Opens the session as a zoetrope flow graph — in a fresh tab, or split
+    /// into its own pane beside the conversation. A running session is
+    /// followed at its live edge; a finished one replays from the start.
+    private func openGraph(_ session: ClaudeSession, alongside: Bool) {
+        let command: String
+        if let zoe = TerminalManager.shared.zoePath {
+            let running = tabs.tab(forSessionID: session.id)
+                .map { terminalManager.isRunning($0.id) } ?? false
+            command = "\(ClaudeSession.shellQuote(zoe)) \(ClaudeSession.shellQuote(session.fileURL.path))"
+                + (running ? " --follow" : "")
+        } else {
+            command = """
+                echo 'zoetrope is not bundled in this build. Install it with:'; \
+                echo; echo '  brew install furkankly/tap/zoetrope'; \
+                echo; echo 'https://github.com/furkankly/zoetrope'
+                """
+        }
+        tabs.openGraph(command: command, session: session, alongside: alongside)
+    }
 
     private func openInVSCode(_ path: String) {
         guard let application = Self.vsCodeURL else { return }

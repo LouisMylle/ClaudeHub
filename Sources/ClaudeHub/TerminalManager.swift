@@ -57,6 +57,21 @@ final class TerminalManager: NSObject, ObservableObject {
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
     private(set) var claudePath: String = "claude"
+
+    /// The bundled zoetrope binary (Resources/bin/zoe) — the session flow
+    /// graph, https://github.com/furkankly/zoetrope — or one the user
+    /// installed themselves. Nil in source builds that skipped bundling.
+    private(set) lazy var zoePath: String? = {
+        let fm = FileManager.default
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/zoe").path,
+           fm.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+        let home = fm.homeDirectoryForCurrentUser.path
+        return ["/opt/homebrew/bin/zoe", "/usr/local/bin/zoe",
+                "\(home)/.cargo/bin/zoe", "\(home)/.local/bin/zoe"]
+            .first { fm.isExecutableFile(atPath: $0) }
+    }()
     private var appearanceObservation: NSKeyValueObservation?
 
     private var keyMonitor: Any?

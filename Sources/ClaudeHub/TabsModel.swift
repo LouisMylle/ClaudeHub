@@ -137,6 +137,17 @@ final class TabsModel: ObservableObject {
         append(TerminalTab(id: id, title: title, cwd: cwd, kind: .script(command)))
     }
 
+    /// A session drawn as a live flow graph by the bundled zoetrope — one
+    /// graph tab per session, restarted fresh each time it is asked for.
+    /// `alongside` puts the graph in its own pane, next to the conversation.
+    func openGraph(command: String, session: ClaudeSession, alongside: Bool) {
+        let id = "zoe-\(session.id)"
+        if tabs.contains(where: { $0.id == id }) { close(id) }
+        append(TerminalTab(id: id, title: "Graph — \(session.title)",
+                           cwd: session.cwd, kind: .script(command)))
+        if alongside { splitOff(id) }
+    }
+
     /// Runs a `claude` subcommand in its own tab — `auth login`, `auth logout`.
     /// Reusing an existing tab of the same command keeps them from piling up.
     func openCommand(_ args: [String], title: String, cwd: String? = nil) {

@@ -75,6 +75,10 @@ off.
 - 🛟 **Quit protection** — warns you before ⌘Q kills running sessions
 - 🔄 **Auto-update** — checks GitHub releases; one click downloads, installs,
   and relaunches
+- 🎡 **Flow graphs** — right-click a session → *Watch as Flow Graph* (or
+  *Watch Alongside* for a split view) and see it drawn live as an agent/tool
+  graph: the main agent, the subagents it spawns, the tools each one runs —
+  powered by the bundled [zoetrope](https://github.com/furkankly/zoetrope)
 - 🔍 Search across projects and session titles, hand-off to Terminal.app,
   reveal in Finder, copy resume command
 
@@ -189,6 +193,17 @@ are left for you to send, so a half-typed message is never mangled. MCP servers 
 `~/.claude.json` and per-project `.mcp.json` files; all mutations go through
 `claude mcp add` / `claude mcp remove` so ClaudeHub never hand-edits your
 config.
+
+## Bundled software
+
+ClaudeHub ships the `zoe` binary from
+[zoetrope](https://github.com/furkankly/zoetrope) by
+[@furkankly](https://github.com/furkankly) (MIT license), which draws a Claude
+Code session as a live flow graph in the terminal. The app bundles the
+official release binaries unmodified (as a universal binary); the license and
+the release checksums travel inside the app at
+`Contents/Resources/zoetrope-LICENSE` and `…-PROVENANCE`. If you already have
+`zoe` on your PATH, source builds use that instead.
 
 ## Disclaimer
 
