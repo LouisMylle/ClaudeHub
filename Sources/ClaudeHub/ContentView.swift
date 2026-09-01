@@ -85,7 +85,10 @@ struct ContentView: View {
             return
         }
         let term = findTerm
-        DispatchQueue.global(qos: .userInitiated).async {
+        // A short pause after the last keystroke: searching on every
+        // character rebuilt the result list four times to type "they".
+        findWork?.cancel()
+        let work = DispatchWorkItem {
             let found = TranscriptSearch.search(term, in: transcript)
             DispatchQueue.main.async {
                 // The field may have moved on while the file was being read.
@@ -95,6 +98,8 @@ struct ContentView: View {
                 findMatches = (found.isEmpty ? 0 : 1, found.count)
             }
         }
+        findWork = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     private func closeFind() {
@@ -572,6 +577,7 @@ struct ContentView: View {
     @State private var findSelected: Int?
     /// Why the selected result could not be jumped to, when it could not.
     @State private var jumpNote: String?
+    @State private var findWork: DispatchWorkItem?
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -1022,6 +1028,7 @@ private struct FindBar: View {
         }
         .background(.bar)
         .onExitCommand(perform: close)
+        .onChange(of: term) { _, _ in cache.map.removeAll() }
     }
 
     private var field: some View {
@@ -1098,12 +1105,24 @@ private struct FindBar: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            // Selected, the row opens up to the whole message — which is the
-            // reading copy when the terminal has scrolled the original away.
-            Text(highlighted(isSelected ? match.full : match.line))
-                .font(.system(size: 11))
-                .lineLimit(isSelected ? 14 : 2)
-                .textSelection(.enabled)
+            // Selected, the row opens up to the whole message — the reading
+            // copy when the terminal cannot show the original. Idle rows show
+            // an excerpt around the hit: laying out a whole paragraph to draw
+            // two lines of it, as a selectable text view, is what dragged.
+            if isSelected {
+                Text(highlighted(match.full, key: "\(match.id)-full"))
+                    .font(.system(size: 11))
+                    .lineLimit(14)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            } else {
+                Text(highlighted(excerpt(of: match.line), key: "\(match.id)"))
+                    .font(.system(size: 11))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if isSelected, let jumpNote {
                 Text(jumpNote)
                     .font(.system(size: 9))
@@ -1119,6 +1138,31 @@ private struct FindBar: View {
         .onTapGesture {
             selected = results.firstIndex { $0.id == match.id }
         }
+    }
+
+    /// Built once per result and term, not on every layout pass.
+    private final class HighlightCache { var map: [String: AttributedString] = [:] }
+    @State private var cache = HighlightCache()
+
+    private func highlighted(_ text: String, key: String) -> AttributedString {
+        let cacheKey = "\(term)|\(key)"
+        if let hit = cache.map[cacheKey] { return hit }
+        let built = highlighted(text)
+        cache.map[cacheKey] = built
+        return built
+    }
+
+    /// Up to ~220 characters around the first hit, so a paragraph-long line
+    /// shows the part that matched rather than its opening words.
+    private func excerpt(of line: String) -> String {
+        guard line.count > 220 else { return line }
+        let hit = line.range(of: term, options: .caseInsensitive)?.lowerBound ?? line.startIndex
+        let start = line.index(hit, offsetBy: -60, limitedBy: line.startIndex) ?? line.startIndex
+        let end = line.index(start, offsetBy: 220, limitedBy: line.endIndex) ?? line.endIndex
+        var piece = String(line[start..<end])
+        if start > line.startIndex { piece = "…" + piece }
+        if end < line.endIndex { piece += "…" }
+        return piece
     }
 
     /// The term picked out of the line, so a result can be read at a glance
