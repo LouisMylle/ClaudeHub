@@ -104,6 +104,24 @@ struct ContentView: View {
         findMatches = (0, 0)
         findResults = []
         findSelected = nil
+        jumpMissed = false
+    }
+
+    /// Scrolls the terminal to a transcript result, when it is still in the
+    /// scrollback. Claude Code only redraws the recent tail of a conversation
+    /// on resume, so an older message has nowhere to jump to — the result row
+    /// shows the whole message instead and says so.
+    private func jump(toResult index: Int?) {
+        jumpMissed = false
+        guard let index, findResults.indices.contains(index),
+              let id = tabs.activeTabID else { return }
+        let line = findResults[index].line
+        // From the term onward, capped: long enough to be unique, short enough
+        // not to straddle a wrapped terminal row.
+        let start = line.range(of: findTerm, options: .caseInsensitive)?.lowerBound ?? line.startIndex
+        let snippet = String(line[start...].prefix(40)).trimmingCharacters(in: .whitespaces)
+        guard !snippet.isEmpty else { return }
+        jumpMissed = terminalManager.findFromStart(snippet, in: id).total == 0
     }
 
     /// The limits of the account the tab you are looking at is running as.
@@ -527,6 +545,8 @@ struct ContentView: View {
     @State private var findMatches = (index: 0, total: 0)
     @State private var findResults: [TranscriptMatch] = []
     @State private var findSelected: Int?
+    /// The selected result is older than the terminal's scrollback.
+    @State private var jumpMissed = false
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -625,10 +645,13 @@ struct ContentView: View {
                             matches: findMatches,
                             results: findResults,
                             selected: $findSelected,
+                            jumpMissed: jumpMissed,
                             searchesTranscript: activeTranscript != nil,
                             search: searchFromStart,
                             step: step,
                             close: closeFind)
+                        // Clicking a result or stepping with ⌘G goes to it.
+                        .onChange(of: findSelected) { _, index in jump(toResult: index) }
                     Divider()
                 }
                 paneStack
@@ -946,6 +969,8 @@ private struct FindBar: View {
     let matches: (index: Int, total: Int)
     let results: [TranscriptMatch]
     @Binding var selected: Int?
+    /// The selected result could not be found in the terminal.
+    let jumpMissed: Bool
     let searchesTranscript: Bool
     let search: () -> Void
     let step: (Bool) -> Void
@@ -1035,10 +1060,17 @@ private struct FindBar: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            Text(highlighted(match.line))
+            // Selected, the row opens up to the whole message — which is the
+            // reading copy when the terminal has scrolled the original away.
+            Text(highlighted(isSelected ? match.full : match.line))
                 .font(.system(size: 11))
-                .lineLimit(isSelected ? nil : 2)
+                .lineLimit(isSelected ? 14 : 2)
                 .textSelection(.enabled)
+            if isSelected && jumpMissed {
+                Text("Older than the terminal's scrollback — shown here instead")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
