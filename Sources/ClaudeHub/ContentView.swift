@@ -1023,6 +1023,10 @@ private struct FindBar: View {
                 .focused($focused)
                 .onChange(of: term) { _, _ in search() }
                 .onSubmit { step(true) }
+                // ↑/↓ walk the results without leaving the field, the way
+                // Spotlight and Xcode's find navigator do.
+                .onKeyPress(.downArrow) { step(true); return .handled }
+                .onKeyPress(.upArrow) { step(false); return .handled }
             if !term.isEmpty {
                 Text(counter)
                     .font(.system(size: 11).monospacedDigit())
