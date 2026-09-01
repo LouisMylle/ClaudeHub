@@ -115,13 +115,32 @@ struct ContentView: View {
         jumpMissed = false
         guard let index, findResults.indices.contains(index),
               let id = tabs.activeTabID else { return }
-        let line = findResults[index].line
-        // From the term onward, capped: long enough to be unique, short enough
-        // not to straddle a wrapped terminal row.
+        // The transcript holds markdown; the terminal shows it rendered — no
+        // asterisks, bullets redrawn, so the snippet is taken from a plain
+        // version of the line, and tried at three lengths: long enough to be
+        // unique first, short enough to survive a wrapped row last.
+        let line = Self.plainText(findResults[index].line)
         let start = line.range(of: findTerm, options: .caseInsensitive)?.lowerBound ?? line.startIndex
-        let snippet = String(line[start...].prefix(40)).trimmingCharacters(in: .whitespaces)
-        guard !snippet.isEmpty else { return }
-        jumpMissed = terminalManager.findFromStart(snippet, in: id).total == 0
+        let rest = String(line[start...])
+        for length in [40, 22, 12] {
+            let snippet = String(rest.prefix(length)).trimmingCharacters(in: .whitespaces)
+            guard snippet.count >= min(length, findTerm.count) else { continue }
+            if terminalManager.findFromStart(snippet, in: id).total > 0 { return }
+        }
+        jumpMissed = true
+    }
+
+    /// A transcript line with its markdown taken off, the way Claude Code
+    /// draws it.
+    private static func plainText(_ text: String) -> String {
+        var plain = text
+        for token in ["**", "__", "`", "~~"] {
+            plain = plain.replacingOccurrences(of: token, with: "")
+        }
+        plain = plain.replacingOccurrences(of: #"^\s*(?:[-*•>]|\d+\.|#+)\s+"#, with: "",
+                                           options: .regularExpression)
+        return plain.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// The limits of the account the tab you are looking at is running as.
@@ -524,9 +543,11 @@ struct ContentView: View {
                 Divider()
             }
             if case .diff(let root) = tab.kind {
-                DiffView(root: root) { file in
-                    openInVSCode((root as NSString).appendingPathComponent(file))
-                }
+                DiffView(root: root,
+                         openInEditor: { file in
+                             openInVSCode((root as NSString).appendingPathComponent(file))
+                         },
+                         close: { tabs.close(tab.id) })
             } else {
                 TerminalHostView(tab: tab,
                                  generation: terminalManager.generation,

@@ -155,10 +155,13 @@ final class DiffModel: ObservableObject {
 struct DiffView: View {
     @StateObject private var model: DiffModel
     let openInEditor: (String) -> Void
+    /// Closes the diff tab — the ✕ in its header, or esc.
+    let close: () -> Void
 
-    init(root: String, openInEditor: @escaping (String) -> Void) {
+    init(root: String, openInEditor: @escaping (String) -> Void, close: @escaping () -> Void) {
         _model = StateObject(wrappedValue: DiffModel(root: root))
         self.openInEditor = openInEditor
+        self.close = close
     }
 
     var body: some View {
@@ -170,6 +173,7 @@ struct DiffView: View {
         }
         .onAppear { model.load() }
         .onChange(of: model.selected) { _, _ in model.loadDiff() }
+        .onExitCommand(perform: close)
     }
 
     private var fileList: some View {
@@ -226,6 +230,15 @@ struct DiffView: View {
                         .controlSize(.small)
                         .clickable()
                 }
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .clickable()
+                .help("Close the diff (esc, ⌘W)")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
