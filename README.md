@@ -14,12 +14,13 @@ resumes in an embedded terminal, in the right folder, instantly.
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/LouisMylle/ClaudeHub)](https://github.com/LouisMylle/ClaudeHub/releases/latest)
 
-<img src="docs/screenshot.png" alt="ClaudeHub screenshot" width="900">
+<img src="docs/screenshot-1.4.png" alt="ClaudeHub screenshot" width="900">
 
 </div>
 
 > Multi-account switching, usage-limit meters, session deletion, split panes,
-> live status dots, and git awareness were contributed by
+> live status dots, git awareness, conversation search, the side-by-side diff,
+> and paste memory were contributed by
 > [@gillesravyse](https://github.com/gillesravyse). Thank you!
 
 ## Why
@@ -79,8 +80,18 @@ off.
   session) draws it live as an agent/tool graph beside the conversation: the
   main agent, the subagents it spawns, the tools each one runs — powered by
   the bundled [zoetrope](https://github.com/furkankly/zoetrope)
-- 🔍 Search across projects and session titles, hand-off to Terminal.app,
-  reveal in Finder, copy resume command
+- 🔎 **Search the conversation** — `⌘F` searches a session's whole transcript,
+  not just what's on screen; ↑/↓ or `⌘G` step through results, each one jumps
+  the terminal to the message when it's visible, or opens up to show it
+- 🧭 **Side-by-side diff** — from the Changes section: a repository's
+  uncommitted work as two aligned columns, changes paired up, files listed
+  beside; click a file to open it in VS Code
+- 📋 **Paste memory** — switching account restarts tabs; a prompt holding a
+  paste or an image carries it across instead of losing it
+- 🔔 **Finished-session notifications** — a session that finishes while you're
+  in another app says so; click the banner to jump to it (asked once, optional)
+- 🔍 Search across projects and session titles, open the folder in VS Code,
+  hand-off to Terminal.app, reveal in Finder, copy resume command
 
 ## Install
 
@@ -127,6 +138,10 @@ package.
 | `⇧⌘W` | Close window |
 | `⌘1`–`⌘9` | Jump to tab |
 | `⌘R` | Rescan sessions |
+| `⌘F` | Find in the conversation (↑/↓ or `⌘G` / `⇧⌘G` step results) |
+| `⌘\` | Open the current tab beside the others (split) |
+| `⌥←` / `⌥→` / `⌥⌫` | Word left / right / delete word in the prompt |
+| `⌘+` / `⌘−` / `⌘0` | Terminal text size |
 
 ## How it works
 
