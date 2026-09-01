@@ -278,7 +278,10 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
-                UsageBars(readout: usageReadout, refresh: {
+                UsageBars(readout: usageReadout,
+                          showsAccount: usageReadout.account
+                              != (accounts.activeProfile ?? accounts.current?.email),
+                          refresh: {
                     usage.refreshByHand()
                     accounts.refreshLimits(force: true)
                 })
@@ -325,25 +328,6 @@ struct ContentView: View {
             .background(.bar)
         }
         .toolbar {
-            ToolbarItem {
-                Menu {
-                    Button("New Terminal Tab") { tabs.openNewTab() }
-                    if !store.projects.isEmpty {
-                        Divider()
-                        Section("Start in project") {
-                            ForEach(store.projects.prefix(10)) { project in
-                                Button(project.name) { newSession(in: project.path) }
-                                    .help(project.path)
-                            }
-                        }
-                    }
-                } label: {
-                    Label("New Session", systemImage: "plus")
-                } primaryAction: {
-                    if tabs.activeTab == nil { newSessionInChosenFolder() } else { newSession() }
-                }
-                .help("Start a new Claude session (⌘N) — hold for more options")
-            }
             ToolbarItem {
                 Button {
                     store.refresh()
@@ -525,17 +509,6 @@ struct ContentView: View {
             .help("Watch this session as a flow graph, beside the conversation")
 
             Menu {
-                Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
-                Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
-                Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
-                Divider()
-                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
-            } label: {
-                Image(systemName: "gauge.with.needle")
-            }
-            .help("Usage, limits and account switching (⌘U)")
-
-            Menu {
                 Section("Open beside this one") {
                     ForEach(tabs.tabs.filter { !tabs.panes.contains($0.id) }) { tab in
                         Button(tab.title) { tabs.splitOff(tab.id) }
@@ -558,10 +531,20 @@ struct ContentView: View {
                 }
                 Divider()
                 Button("New Claude Session in Folder…") { newSessionInChosenFolder() }
+                if !store.projects.isEmpty {
+                    Section("Start in project") {
+                        ForEach(store.projects.prefix(10)) { project in
+                            Button(project.name) { newSession(in: project.path) }
+                                .help(project.path)
+                        }
+                    }
+                }
             } label: {
                 Image(systemName: "plus")
+            } primaryAction: {
+                if tabs.activeTab == nil { newSessionInChosenFolder() } else { newSession() }
             }
-            .help("New Claude session or terminal in \(TabsModel.folderName(tabs.currentFolder))")
+            .help("New Claude session (⌘N) — hold for a terminal, another folder, or a project")
         }
     }
 

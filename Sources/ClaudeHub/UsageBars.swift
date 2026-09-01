@@ -18,6 +18,8 @@ struct UsageReadout: Equatable {
 /// The 5-hour and weekly limits, always on screen in the sidebar footer.
 struct UsageBars: View {
     let readout: UsageReadout
+    /// False when the footer's account chip already names this account.
+    var showsAccount = true
     let refresh: () -> Void
 
     private static let barWidth: CGFloat = 90
@@ -30,12 +32,16 @@ struct UsageBars: View {
                 VStack(alignment: .leading, spacing: 5) {
                     row("5h", readout.session, at: context.date)
                     row("Week", readout.week, at: context.date)
-                    // Never a bare percentage: it says whose it is.
-                    Text(readout.account)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .padding(.leading, 39)
+                    // Named only when these are NOT the account chip's numbers
+                    // — a tab running as someone else. Same account twice in
+                    // one footer said nothing.
+                    if showsAccount {
+                        Text(readout.account)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .padding(.leading, 39)
+                    }
                 }
             }
             Button {
