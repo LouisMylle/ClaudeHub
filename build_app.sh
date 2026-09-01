@@ -43,6 +43,11 @@ if [[ -f Vendor/zoetrope/zoe ]]; then
     cp Vendor/zoetrope/PROVENANCE "$APP/Contents/Resources/zoetrope-PROVENANCE"
     codesign --force -s - "$APP/Contents/Resources/bin/zoe"
 fi
+# License texts travel with the app: ours, and the ones the bundled
+# software requires.
+cp LICENSE "$APP/Contents/Resources/LICENSE"
+cp NOTICE "$APP/Contents/Resources/NOTICE"
+cp .build/checkouts/SwiftTerm/LICENSE "$APP/Contents/Resources/SwiftTerm-LICENSE" 2>/dev/null || true
 codesign --force -s - "$APP"
 echo "Built $APP"
 

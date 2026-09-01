@@ -1,0 +1,20 @@
+ClaudeHub
+Copyright 2026 Louis Mylle
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Portions contributed by Gilles Ravyse (https://github.com/gillesravyse) were
+submitted under the MIT License and remain available under those terms.
+
+This product bundles third-party software:
+
+  SwiftTerm — https://github.com/migueldeicaza/SwiftTerm
+  Copyright (c) 2019-2026 Miguel de Icaza; portions Copyright (c) 2017-2019
+  The xterm.js authors, (c) 2014-2016 SourceLair Private Company,
+  (c) 2012-2013 Christopher Jeffrey. MIT License (Resources/SwiftTerm-LICENSE
+  in the app bundle).
+
+  zoetrope — https://github.com/furkankly/zoetrope
+  Copyright (c) 2026 Furkan Kalaycioglu. MIT License
+  (Resources/zoetrope-LICENSE in the app bundle; official release binaries,
+  unmodified — see Resources/zoetrope-PROVENANCE).

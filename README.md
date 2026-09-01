@@ -11,7 +11,7 @@ resumes in an embedded terminal, in the right folder, instantly.
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)
 ![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
 ![SwiftUI + SwiftTerm](https://img.shields.io/badge/SwiftUI-%2B%20SwiftTerm-purple)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-green)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/LouisMylle/ClaudeHub)](https://github.com/LouisMylle/ClaudeHub/releases/latest)
 
 <img src="docs/screenshot-1.4.png" alt="ClaudeHub screenshot" width="900">
@@ -222,6 +222,10 @@ config.
 
 ## Bundled software
 
+The embedded terminal is [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
+by Miguel de Icaza (MIT), linked into the app; its license ships in the
+bundle as `Contents/Resources/SwiftTerm-LICENSE`.
+
 ClaudeHub ships the `zoe` binary from
 [zoetrope](https://github.com/furkankly/zoetrope) by
 [@furkankly](https://github.com/furkankly) (MIT license), which draws a Claude
@@ -239,4 +243,5 @@ PBC. The app simply drives the official `claude` CLI on your machine.
 
 ## License
 
-[MIT](LICENSE) © 2026 Louis Mylle
+[Apache 2.0](LICENSE) © 2026 Louis Mylle — see [NOTICE](NOTICE) for
+contributor and third-party attributions.
