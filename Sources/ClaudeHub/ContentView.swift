@@ -140,6 +140,7 @@ struct ContentView: View {
             sidebar
         } detail: {
             detail
+                .toolbar { detailToolbar }
         }
         .onAppear {
             store.refresh()
@@ -233,13 +234,7 @@ struct ContentView: View {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
-                                   isHidden: store.hiddenSessionIDs.contains(session.id),
-                                   // Split beside the open conversation, or a
-                                   // plain graph tab when the chat is closed.
-                                   watchGraph: {
-                                       openGraph(session,
-                                                 alongside: tabs.tab(forSessionID: session.id) != nil)
-                                   })
+                                   isHidden: store.hiddenSessionIDs.contains(session.id))
                             .clickable()
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
@@ -374,7 +369,6 @@ struct ContentView: View {
         GeometryReader { geometry in
             let ids = tabs.visiblePanes
             let available = max(1, geometry.size.width
-                                - Self.splitStripWidth
                                 - Self.handleWidth * CGFloat(max(0, ids.count - 1)))
             let widths = paneWidths(count: ids.count, available: available)
             HStack(spacing: 0) {
@@ -391,13 +385,14 @@ struct ContentView: View {
                         }
                     }
                 }
-                splitDropStrip
             }
+            // The split target only exists while a drag is over it — an
+            // always-visible strip is dead space the rest of the time.
+            .overlay(alignment: .trailing) { splitDropStrip }
         }
     }
 
     private static let handleWidth: CGFloat = 6
-    private static let splitStripWidth: CGFloat = 26
 
     private func paneWidths(count: Int, available: CGFloat) -> [CGFloat] {
         paneShares(count).map { available * CGFloat($0) }
@@ -459,9 +454,10 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .help("Close this pane — the tab stays open")
                 }
+                .opacity(isFocused ? 1 : 0.6)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(isFocused ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.04))
+                .background(.bar)
                 .contentShape(Rectangle())
                 .clickable()
                 .onTapGesture(count: 2) { tabs.maximisePane(index) }
@@ -492,31 +488,92 @@ struct ContentView: View {
 
     private var splitDropStrip: some View {
         Rectangle()
-            .fill(splitTargeted ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06))
-            .frame(width: Self.splitStripWidth)
-            .overlay(
-                Image(systemName: "rectangle.split.2x1")
-                    .font(.system(size: 11))
-                    .foregroundStyle(splitTargeted ? Color.accentColor : Color.secondary.opacity(0.6))
-            )
+            .fill(splitTargeted ? Color.accentColor.opacity(0.22) : Color.clear)
+            .frame(width: 18)
+            .overlay {
+                if splitTargeted {
+                    Image(systemName: "rectangle.split.2x1")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
             .animation(.easeOut(duration: 0.15), value: splitTargeted)
             .dropDestination(for: String.self) { ids, _ in
                 guard let id = ids.first else { return false }
                 tabs.splitOff(id)
                 return true
             } isTargeted: { splitTargeted = $0 }
-            .help("Drop a tab here to open it beside this one (⌘\\)")
+    }
+
+    /// The session the graph button would draw: the active tab's conversation.
+    private var activeGraphSession: ClaudeSession? {
+        tabs.activeTab?.sessionID.flatMap(session(withID:))
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                if let session = activeGraphSession {
+                    openGraph(session, alongside: true)
+                }
+            } label: {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+            }
+            .disabled(activeGraphSession == nil)
+            .help("Watch this session as a flow graph, beside the conversation")
+
+            Menu {
+                Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
+                Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
+                Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
+                Divider()
+                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
+            } label: {
+                Image(systemName: "gauge.with.needle")
+            }
+            .help("Usage, limits and account switching (⌘U)")
+
+            Menu {
+                Section("Open beside this one") {
+                    ForEach(tabs.tabs.filter { !tabs.panes.contains($0.id) }) { tab in
+                        Button(tab.title) { tabs.splitOff(tab.id) }
+                    }
+                }
+                if tabs.groups.count > 1 {
+                    Divider()
+                    Button("Close Other Panes") { tabs.maximisePane(tabs.focusedPane) }
+                }
+            } label: {
+                Image(systemName: "rectangle.split.2x1")
+            }
+            .disabled(tabs.tabs.count <= 1)
+            .help("Show two or three tabs side by side (⌘\\) — or drag a tab to the right edge")
+
+            Menu {
+                Section(TabsModel.folderName(tabs.currentFolder)) {
+                    Button("New Claude Session") { newSession() }
+                    Button("New Terminal") { tabs.openNewTab() }
+                }
+                Divider()
+                Button("New Claude Session in Folder…") { newSessionInChosenFolder() }
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("New Claude session or terminal in \(TabsModel.folderName(tabs.currentFolder))")
+        }
     }
 
     @ViewBuilder
     private var detail: some View {
         if let tab = tabs.activeTab {
             VStack(spacing: 0) {
-                TabBarView(newSession: { newSession() },
-                           newSessionElsewhere: { newSessionInChosenFolder() },
-                           accounts: accounts,
-                           usage: usage)
-                Divider()
+                // Split panes carry their own tab strips in their headers.
+                if tabs.groups.count <= 1 {
+                    TabBarView(accounts: accounts)
+                    Divider()
+                }
                 if tab.isCommand, let link = terminalManager.signInURL(in: tab.id) {
                     SignInLinkBar(url: link)
                     Divider()
@@ -815,73 +872,16 @@ private struct TabStrip: View {
 private struct TabBarView: View {
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
-    let newSession: () -> Void
-    let newSessionElsewhere: () -> Void
     @ObservedObject var accounts: AccountStore
-    @ObservedObject var usage: UsageStore
 
     var body: some View {
+        // Just the tabs: the window controls live in the toolbar, the way
+        // Safari keeps its buttons in the title bar rather than the tab row.
         HStack(spacing: 4) {
-            // Split, and each pane carries its own strip in its header — one
-            // row of everybody's tabs would say nothing about which pane a tab
-            // belongs to.
-            if tabs.groups.count <= 1 {
-                TabStrip(pane: 0, accounts: accounts)
-            } else {
-                Spacer(minLength: 0)
-            }
-            Menu {
-                Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
-                Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
-                Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
-                Divider()
-                AccountItems(accounts: accounts, tabs: tabs, usage: usage)
-            } label: {
-                Image(systemName: "gauge.with.needle")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .clickable()
-            .help("Usage, limits and account switching (⌘U)")
-            if tabs.tabs.count > 1 {
-                Menu {
-                    Section("Open beside this one") {
-                        ForEach(tabs.tabs.filter { !tabs.panes.contains($0.id) }) { tab in
-                            Button(tab.title) { tabs.splitOff(tab.id) }
-                        }
-                    }
-                    if tabs.groups.count > 1 {
-                        Divider()
-                        Button("Close Other Panes") { tabs.maximisePane(tabs.focusedPane) }
-                    }
-                } label: {
-                    Image(systemName: "rectangle.split.2x1")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .clickable()
-                .help("Show two or three tabs side by side (⌘\\) — or drag a tab to the right edge")
-            }
-            Menu {
-                Section(TabsModel.folderName(tabs.currentFolder)) {
-                    Button("New Claude Session") { newSession() }
-                    Button("New Terminal") { tabs.openNewTab() }
-                }
-                Divider()
-                Button("New Claude Session in Folder…") { newSessionElsewhere() }
-            } label: {
-                Image(systemName: "plus")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .clickable()
-            .help("New Claude session or terminal in this folder — both open in \(TabsModel.folderName(tabs.currentFolder))")
-            .padding(.trailing, 8)
+            TabStrip(pane: 0, accounts: accounts)
+            Spacer(minLength: 4)
         }
-        .padding(.leading, 8)
+        .padding(.horizontal, 8)
         .background(.bar)
     }
 }
@@ -1028,12 +1028,8 @@ private struct TabChip: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.accentColor.opacity(0.18)
-                      : hovering ? Color.primary.opacity(0.07) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isActive ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
+                .fill(isActive ? Color.primary.opacity(0.10)
+                      : hovering ? Color.primary.opacity(0.05) : Color.clear)
         )
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -1269,9 +1265,6 @@ private struct SessionRow: View {
     let session: ClaudeSession
     let activity: TerminalActivity
     let isHidden: Bool
-    /// Opens this session as a zoetrope flow graph — the hover button's action.
-    let watchGraph: () -> Void
-    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1283,15 +1276,6 @@ private struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if isHovering {
-                Button(action: watchGraph) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Watch as flow graph")
-            }
             if isHidden {
                 Image(systemName: "eye.slash")
                     .font(.caption2)
@@ -1303,7 +1287,6 @@ private struct SessionRow: View {
         }
         .padding(.vertical, 1)
         .opacity(isHidden ? 0.55 : 1)
-        .onHover { isHovering = $0 }
     }
 }
 
@@ -1324,6 +1307,12 @@ private struct ProjectHeader<MenuContent: View>: View {
         repos.count == 1 ? repos[0].branch : "\(repos.count) repos"
     }
 
+    /// ~/Documents/… instead of the full /Users/… mouthful.
+    static func abbreviate(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
     private var tooltip: String {
         repos.map { repo in
             let state = repo.pending > 0 ? "\(repo.pending) uncommitted" : "clean"
@@ -1332,20 +1321,30 @@ private struct ProjectHeader<MenuContent: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 5) {
+            // The folder is the real thing: drag it into Finder, Terminal or a
+            // file dialog and the project's path travels with it.
             Image(systemName: "folder.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.accentColor)
-            Text(project.name)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text("\(project.sessions.count)")
-                .font(.system(size: 11, weight: .medium).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(Color.primary.opacity(0.08), in: Capsule())
+                .draggable(URL(fileURLWithPath: project.path))
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(project.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text("\(project.sessions.count)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                Text(Self.abbreviate(project.path))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer(minLength: 6)
             if !repos.isEmpty {
                 HStack(spacing: 4) {
@@ -1379,8 +1378,8 @@ private struct ProjectHeader<MenuContent: View>: View {
             .padding(.trailing, 8)
             .help("New Claude session in \(project.name)")
         }
-        .padding(.top, 12)
-        .padding(.bottom, 3)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
         .contentShape(Rectangle())
         // Deferred: setting state straight from a hover callback mutates the
         // row while AppKit is still laying the table out.
