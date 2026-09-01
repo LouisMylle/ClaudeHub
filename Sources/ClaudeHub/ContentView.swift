@@ -233,7 +233,13 @@ struct ContentView: View {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
-                                   isHidden: store.hiddenSessionIDs.contains(session.id))
+                                   isHidden: store.hiddenSessionIDs.contains(session.id),
+                                   // Split beside the open conversation, or a
+                                   // plain graph tab when the chat is closed.
+                                   watchGraph: {
+                                       openGraph(session,
+                                                 alongside: tabs.tab(forSessionID: session.id) != nil)
+                                   })
                             .clickable()
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
@@ -1263,6 +1269,9 @@ private struct SessionRow: View {
     let session: ClaudeSession
     let activity: TerminalActivity
     let isHidden: Bool
+    /// Opens this session as a zoetrope flow graph — the hover button's action.
+    let watchGraph: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1274,6 +1283,15 @@ private struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if isHovering {
+                Button(action: watchGraph) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Watch as flow graph")
+            }
             if isHidden {
                 Image(systemName: "eye.slash")
                     .font(.caption2)
@@ -1285,6 +1303,7 @@ private struct SessionRow: View {
         }
         .padding(.vertical, 1)
         .opacity(isHidden ? 0.55 : 1)
+        .onHover { isHovering = $0 }
     }
 }
 
