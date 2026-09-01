@@ -363,6 +363,8 @@ struct AccountChip: View {
             : "person.crop.circle"
     }
 
+    @State private var hovering = false
+
     var body: some View {
         Menu {
             AccountItems(accounts: accounts, tabs: tabs, usage: usage)
@@ -379,8 +381,22 @@ struct AccountChip: View {
                         .padding(.vertical, 1)
                         .background(Color.accentColor.opacity(0.18), in: Capsule())
                 }
+                // The popup chevron every macOS picker wears — without it this
+                // read as a caption, not a control.
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
             .font(.caption)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.primary.opacity(hovering ? 0.10 : 0.05))
+            )
+            .onHover { value in
+                DispatchQueue.main.async { hovering = value }
+            }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
