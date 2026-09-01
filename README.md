@@ -75,10 +75,10 @@ off.
 - 🛟 **Quit protection** — warns you before ⌘Q kills running sessions
 - 🔄 **Auto-update** — checks GitHub releases; one click downloads, installs,
   and relaunches
-- 🎡 **Flow graphs** — right-click a session → *Watch as Flow Graph* (or
-  *Watch Alongside* for a split view) and see it drawn live as an agent/tool
-  graph: the main agent, the subagents it spawns, the tools each one runs —
-  powered by the bundled [zoetrope](https://github.com/furkankly/zoetrope)
+- 🎡 **Flow graphs** — the graph button in the toolbar (or right-click a
+  session) draws it live as an agent/tool graph beside the conversation: the
+  main agent, the subagents it spawns, the tools each one runs — powered by
+  the bundled [zoetrope](https://github.com/furkankly/zoetrope)
 - 🔍 Search across projects and session titles, hand-off to Terminal.app,
   reveal in Finder, copy resume command
 

@@ -388,19 +388,21 @@ struct AccountChip: View {
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.primary.opacity(hovering ? 0.10 : 0.05))
-            )
-            .onHover { value in
-                DispatchQueue.main.async { hovering = value }
-            }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        // Chrome on the menu, not in the label: label styling gets flattened
+        // by the borderless menu button and never reaches the screen.
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.primary.opacity(hovering ? 0.10 : 0.05))
+        )
+        .onHover { value in
+            DispatchQueue.main.async { hovering = value }
+        }
         .clickable()
         .help(helpText)
     }
