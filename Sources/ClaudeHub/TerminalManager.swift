@@ -118,6 +118,20 @@ final class TerminalManager: NSObject, ObservableObject {
                 terminal.send(txt: "\u{15}")
                 return nil
             }
+            // Option+Arrow / Option+Delete — word-left, word-right, and
+            // delete-word in the prompt. SwiftTerm sends plain arrows for
+            // these, so the readline meta sequences (ESC+b / ESC+f / ESC+DEL)
+            // are supplied here, the way Terminal.app's option bindings do.
+            if event.modifierFlags.contains(.option),
+               !event.modifierFlags.contains(.command),
+               let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
+                switch event.keyCode {
+                case 123: terminal.send(txt: "\u{1b}b"); return nil   // ⌥←
+                case 124: terminal.send(txt: "\u{1b}f"); return nil   // ⌥→
+                case 51:  terminal.send(txt: "\u{1b}\u{7f}"); return nil  // ⌥⌫
+                default: break
+                }
+            }
             return event
         }
         activityTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
