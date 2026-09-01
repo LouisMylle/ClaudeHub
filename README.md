@@ -95,6 +95,17 @@ off.
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install --cask --no-quarantine LouisMylle/tap/claudehub
+```
+
+`--no-quarantine` is needed because the app is ad-hoc signed (not
+notarized) — without it macOS refuses to open it until you clear the
+quarantine flag by hand (see below). Update with `brew upgrade --cask
+claudehub`, or just let the in-app updater do it.
+
 ### Download
 
 1. Grab the latest `ClaudeHub-x.y.z.zip` from
