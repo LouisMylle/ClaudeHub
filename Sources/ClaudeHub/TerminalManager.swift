@@ -96,6 +96,10 @@ final class TerminalManager: NSObject, ObservableObject {
     private var appearanceObservation: NSKeyValueObservation?
 
     private var keyMonitor: Any?
+    private var mouseMonitor: Any?
+    /// The folder each live terminal started in, for resolving relative paths
+    /// Claude prints — `src/Foo.swift:42` means that file in that folder.
+    private var folders: [String: String] = [:]
 
     /// Terminal text size, shared by every tab and remembered across launches.
     @Published private(set) var fontSize: CGFloat = {
@@ -171,9 +175,96 @@ final class TerminalManager: NSObject, ObservableObject {
             }
             return event
         }
+        // ⌘-click on a file path opens it in VS Code at that line — Claude
+        // prints `src/Foo.swift:42` all day long. URLs open in the browser.
+        // A monitor rather than an override: SwiftTerm's mouseDown is not
+        // open to subclasses, same as its keyDown.
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, event.modifierFlags.contains(.command),
+                  let window = event.window,
+                  var view = window.contentView?.hitTest(event.locationInWindow) else { return event }
+            while !(view is LocalProcessTerminalView), let parent = view.superview { view = parent }
+            guard let terminalView = view as? LocalProcessTerminalView,
+                  let tabID = self.terminals.first(where: { $0.value === terminalView })?.key,
+                  self.openLink(at: event, in: terminalView, tabID: tabID) else { return event }
+            return nil
+        }
         activityTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             self?.pollActivity()
         }
+    }
+
+    // MARK: - ⌘-click on paths and links
+
+    /// Reads the row under the pointer, finds the path or URL the click landed
+    /// on, and opens it. False when there was nothing to open, so the click
+    /// falls through to the terminal.
+    private func openLink(at event: NSEvent, in view: LocalProcessTerminalView, tabID: String) -> Bool {
+        let terminal = view.getTerminal()
+        let point = view.convert(event.locationInWindow, from: nil)
+        let fromTop = view.isFlipped ? point.y : view.bounds.height - point.y
+        let cellHeight = view.bounds.height / CGFloat(max(terminal.rows, 1))
+        let cellWidth = view.bounds.width / CGFloat(max(terminal.cols, 1))
+        let row = Int(fromTop / cellHeight)
+        let col = Int(point.x / cellWidth)
+        guard row >= 0, row < terminal.rows, let line = terminal.getLine(row: row) else { return false }
+        let text = Self.readable(line.translateToString(trimRight: false))
+        guard let token = Self.linkToken(in: text, at: col) else { return false }
+
+        if token.contains("://"), let url = URL(string: token) {
+            NSWorkspace.shared.open(url)
+            return true
+        }
+        return openFile(token, from: folders[tabID] ?? FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    /// The run of path characters around `col`, with the punctuation a
+    /// sentence hangs on it taken off. Nil unless it looks like a path or URL.
+    private static func linkToken(in text: String, at col: Int) -> String? {
+        let chars = Array(text)
+        guard !chars.isEmpty else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-./~:@+%#?=&"))
+        func ok(_ c: Character) -> Bool { c.unicodeScalars.allSatisfy { allowed.contains($0) } }
+        var start = min(max(col, 0), chars.count - 1)
+        guard ok(chars[start]) else { return nil }
+        var end = start
+        while start > 0, ok(chars[start - 1]) { start -= 1 }
+        while end + 1 < chars.count, ok(chars[end + 1]) { end += 1 }
+        var token = String(chars[start...end])
+        while let last = token.last, ".,;:)]}'\"".contains(last) { token.removeLast() }
+        guard token.contains("/") || token.contains(".") else { return nil }
+        return token
+    }
+
+    /// `path`, `path:line`, or `path:line:col` — relative to the tab's folder
+    /// — in VS Code when it is installed, else whatever opens that file.
+    private func openFile(_ token: String, from folder: String) -> Bool {
+        let parts = token.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        var path = parts[0]
+        let line = parts.count > 1 ? Int(parts[1]) : nil
+        let column = parts.count > 2 ? Int(parts[2]) : nil
+        if path.hasPrefix("~") {
+            path = FileManager.default.homeDirectoryForCurrentUser.path + path.dropFirst()
+        } else if !path.hasPrefix("/") {
+            path = (folder as NSString).appendingPathComponent(path)
+        }
+        path = (path as NSString).standardizingPath
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+
+        let fileURL = URL(fileURLWithPath: path)
+        if let vsCode = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode") {
+            if let line,
+               let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+               let url = URL(string: "vscode://file\(encoded):\(line)\(column.map { ":\($0)" } ?? "")") {
+                NSWorkspace.shared.open(url)
+            } else {
+                NSWorkspace.shared.open([fileURL], withApplicationAt: vsCode,
+                                        configuration: NSWorkspace.OpenConfiguration())
+            }
+        } else {
+            NSWorkspace.shared.open(fileURL)
+        }
+        return true
     }
 
     /// Terminals whose process is still alive (used by quit protection).
@@ -287,6 +378,7 @@ final class TerminalManager: NSObject, ObservableObject {
 
         deadTabs.remove(tab.id)
         terminals[tab.id] = view
+        folders[tab.id] = tab.cwd
         return view
     }
 
@@ -422,6 +514,7 @@ final class TerminalManager: NSObject, ObservableObject {
     }
 
     func closeTerminal(for tabID: String) {
+        folders[tabID] = nil
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
             view.terminate()
         }
