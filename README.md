@@ -90,6 +90,11 @@ off.
   paste or an image carries it across instead of losing it
 - 🔔 **Finished-session notifications** — a session that finishes while you're
   in another app says so; click the banner to jump to it (asked once, optional)
+- 📎 **Drag anything in** — a file from Finder, an attachment straight from
+  Mail or Photos, or a bare image from a browser: drop it on the terminal and
+  its escaped path is typed at the prompt, ready to ask about
+- 🖱️ **⌘-click paths** — `src/Foo.swift:42` in Claude's output opens in
+  VS Code at that line; URLs open in the browser
 - 🔍 Search across projects and session titles, open the folder in VS Code,
   hand-off to Terminal.app, reveal in Finder, copy resume command
 
@@ -153,6 +158,7 @@ package.
 | `⌘\` | Open the current tab beside the others (split) |
 | `⌥←` / `⌥→` / `⌥⌫` | Word left / right / delete word in the prompt |
 | `⌘+` / `⌘−` / `⌘0` | Terminal text size |
+| ⌘-click | Open the clicked file path in VS Code (URLs in the browser) |
 
 ## How it works
 
